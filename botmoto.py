@@ -362,9 +362,11 @@ async def autorenew_choice(message: types.Message, state: FSMContext):
     # Проверка оплаты
     for _ in range(60):
         paid = await check_payment(order_id)
+
         if paid:
             cursor.execute("""
-                UPDATE purchases SET status='queued'
+                UPDATE purchases 
+                SET status='queued'
                 WHERE telegram_id=? AND status='waiting_payment'
             """, (message.from_user.id,))
             conn.commit()
@@ -376,43 +378,43 @@ async def autorenew_choice(message: types.Message, state: FSMContext):
             """, (message.from_user.id,))
             purchase_id = cursor.fetchone()[0]
 
+            # Проверяем есть ли активный закреп
             cursor.execute("SELECT COUNT(*) FROM purchases WHERE status='active'")
-active_count = cursor.fetchone()[0]
+            active_count = cursor.fetchone()[0]
 
-if active_count == 0:
-    cursor.execute("""
-        SELECT post_text, start_time, end_time 
-        FROM purchases WHERE id=?
-    """, (purchase_id,))
-    p = cursor.fetchone()
+            if active_count == 0:
+                cursor.execute("""
+                    SELECT post_text, start_time 
+                    FROM purchases WHERE id=?
+                """, (purchase_id,))
+                post_text, start_time = cursor.fetchone()
 
-    post_text, start_time, end_time = p
-    start_dt = datetime.fromisoformat(start_time)
+                start_dt = datetime.fromisoformat(start_time)
 
-    if datetime.now() >= start_dt:
-        msg = await bot.send_message(CHAT_ID, post_text)
-        await bot.pin_chat_message(CHAT_ID, msg.message_id)
+                if datetime.now() >= start_dt:
+                    msg = await bot.send_message(CHAT_ID, post_text)
+                    await bot.pin_chat_message(CHAT_ID, msg.message_id)
 
-        cursor.execute("""
-            UPDATE purchases
-            SET status='active', message_id=?
-            WHERE id=?
-        """, (msg.message_id, purchase_id))
-        conn.commit()
+                    cursor.execute("""
+                        UPDATE purchases
+                        SET status='active', message_id=?
+                        WHERE id=?
+                    """, (msg.message_id, purchase_id))
+                    conn.commit()
 
-        await message.answer("✅ Оплата прошла. Закреп активирован.")
-    else:
-        add_to_queue(purchase_id)
-        await message.answer("✅ Оплата прошла. Добавлено в очередь.")
-else:
-    add_to_queue(purchase_id)
-    await message.answer("✅ Оплата прошла. Добавлено в очередь.")
+                    await message.answer("✅ Оплата прошла. Закреп активирован.")
+                else:
+                    add_to_queue(purchase_id)
+                    await message.answer("✅ Оплата прошла. Добавлено в очередь.")
+            else:
+                add_to_queue(purchase_id)
+                await message.answer("✅ Оплата прошла. Добавлено в очередь.")
+
             break
 
         await asyncio.sleep(10)
 
     await state.clear()
-
 
 @dp.message(F.text == "🧾 История")
 async def history(message: types.Message):
@@ -461,5 +463,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
