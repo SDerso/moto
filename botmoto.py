@@ -311,20 +311,27 @@ async def choose_days(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("date_"))
 async def choose_date(callback: types.CallbackQuery, state: FSMContext):
-    date_str = callback.data.split("_")[1]
-    start_date = datetime.fromisoformat(date_str)
+    # Подтверждаем нажатие кнопки, чтобы не "крутился" часик в Telegram
+    await callback.answer()
+
+    date_str = callback.data.split("_")[1]  # YYYY-MM-DD
+    try:
+        start_date = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        await callback.message.answer("❌ Ошибка формата даты.")
+        return
 
     data = await state.get_data()
-    days = data["days"]
+    days = data.get("days", 1)
 
+    # Проверяем, свободен ли слот
     if not is_slot_free(start_date, days):
-        await callback.answer("❌ Эти даты заняты", show_alert=True)
+        await callback.message.answer("❌ Эти даты заняты")
         return
 
     await state.update_data(start_date=start_date.isoformat())
     await callback.message.answer("✍ Отправьте текст поста")
     await state.set_state(Order.writing_post)
-
 
 @dp.message(Order.writing_post)
 async def receive_post(message: types.Message, state: FSMContext):
@@ -469,6 +476,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
