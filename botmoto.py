@@ -1,22 +1,23 @@
-# botmoto_tbank_fixed.py
+# =========================
+# BOTMOTO T-BANK FIXED
+# Оплата вручную на карту Тинькофф
+# Полная админка, резерв, очередь, уведомления, автоснятие
+# =========================
 
 import asyncio
 import sqlite3
 from datetime import datetime, timedelta
-import uuid
 import os
-
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.filters.state import State, StatesGroup
-from aiogram.filters import Text
 
 # ================= CONFIG =================
-BOT_TOKEN = os.getenv("API_TOKEN")  # вставьте сюда ваш токен бота
-CHAT_ID = -100411379361  # ID чата для закрепов
-ADMIN_IDS = [411379361]  # ID админов
+BOT_TOKEN = os.getenv("API_TOKEN")
+CHAT_ID = -100411379361
+ADMIN_IDS = [411379361]
 PRICE_PER_DAY = 100
 
 # ================= INIT BOT =================
@@ -85,9 +86,8 @@ def date_keyboard():
             text=f"{status} {d.strftime('%d-%m')}",
             callback_data=f"date_{d.date()}"
         ))
-    
+    # формируем inline_keyboard по 2 кнопки в ряд
     kb = InlineKeyboardMarkup(inline_keyboard=[])
-    # Добавляем кнопки по 2 в ряд
     row = []
     for idx, btn in enumerate(buttons, start=1):
         row.append(btn)
@@ -99,7 +99,7 @@ def date_keyboard():
     return kb
 
 def admin_confirmation_keyboard(purchase_id):
-    kb = InlineKeyboardMarkup(row_width=2)
+    kb = InlineKeyboardMarkup()
     kb.add(
         InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{purchase_id}"),
         InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{purchase_id}")
@@ -114,7 +114,7 @@ def get_price():
 def is_slot_free(start_date, days):
     end_date = start_date + timedelta(days=days)
     cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE status IN ('waiting_admin','active')")
-    for db_start_str, db_end_str, status in cursor.fetchall():
+    for db_start_str, db_end_str, _ in cursor.fetchall():
         db_start = datetime.fromisoformat(db_start_str)
         db_end = datetime.fromisoformat(db_end_str)
         if not (end_date <= db_start or start_date >= db_end):
@@ -142,14 +142,11 @@ async def activate_purchase(purchase_id):
         await bot.pin_chat_message(CHAT_ID, msg.message_id)
         cursor.execute("UPDATE purchases SET status='active', message_id=? WHERE id=?",(msg.message_id,purchase_id))
         conn.commit()
-    else:
-        # запланируем через планировщик
-        pass
 
 async def scheduler():
     while True:
         now = datetime.now()
-        # Снять завершившиеся закрепы
+        # снять завершившиеся закрепы
         cursor.execute("SELECT id,telegram_id,end_time,message_id FROM purchases WHERE status='active'")
         for purchase_id, tg_id, end_time_str, message_id in cursor.fetchall():
             end_time = datetime.fromisoformat(end_time_str)
@@ -161,20 +158,20 @@ async def scheduler():
                     pass
                 cursor.execute("UPDATE purchases SET status='finished' WHERE id=?",(purchase_id,))
                 conn.commit()
-        # Запуск резервов, если дата наступила
+        # активировать резервы, если дата наступила
         cursor.execute("SELECT id FROM purchases WHERE status='waiting_admin'")
         for purchase_id, in cursor.fetchall():
             await activate_purchase(purchase_id)
         await asyncio.sleep(60)
 
 # ================= HANDLERS =================
-@dp.message(Text("/start"))
+@dp.message(F.text == "/start")
 async def start(message: types.Message):
     cursor.execute("INSERT OR IGNORE INTO users VALUES(?,?)",(message.from_user.id,message.from_user.username))
     conn.commit()
     await message.answer("🏍 Добро пожаловать в систему закрепов!", reply_markup=main_menu())
 
-@dp.message(Text("📌 Купить закреп"))
+@dp.message(F.text == "📌 Купить закреп")
 async def buy(message: types.Message, state: FSMContext):
     await message.answer(f"💰 Цена за 1 день: {get_price()} руб\nВыберите срок:", reply_markup=days_keyboard())
     await state.set_state(Order.choosing_days)
@@ -190,7 +187,7 @@ async def choose_days(message: types.Message, state: FSMContext):
     await message.answer("📅 Выберите дату начала:", reply_markup=date_keyboard())
     await state.set_state(Order.choosing_date)
 
-@dp.callback_query(lambda c: c.data.startswith("date_"))
+@dp.callback_query(F.data.startswith("date_"))
 async def choose_date(callback: types.CallbackQuery, state: FSMContext):
     date_str = callback.data.split("_")[1]
     start_date = datetime.fromisoformat(date_str)
@@ -221,7 +218,7 @@ async def receive_post(message: types.Message, state: FSMContext):
     await state.clear()
 
 # ================= ADMIN CALLBACK =================
-@dp.callback_query(lambda c: c.data.startswith("confirm_"))
+@dp.callback_query(F.data.startswith("confirm_"))
 async def confirm_payment(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[1])
     await activate_purchase(purchase_id)
@@ -231,7 +228,7 @@ async def confirm_payment(callback: types.CallbackQuery):
     await callback.message.edit_text("✅ Оплата подтверждена. Закреп активирован")
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data.startswith("cancel_"))
+@dp.callback_query(F.data.startswith("cancel_"))
 async def cancel_payment(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[1])
     cursor.execute("SELECT telegram_id FROM purchases WHERE id=?",(purchase_id,))
@@ -242,7 +239,8 @@ async def cancel_payment(callback: types.CallbackQuery):
     await callback.message.edit_text("❌ Оплата не подтверждена. Резерв снят.")
     await callback.answer()
 
-@dp.message(Text("🧾 История"))
+# ================= USER HISTORY =================
+@dp.message(F.text == "🧾 История")
 async def history(message: types.Message):
     cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE telegram_id=?",(message.from_user.id,))
     rows = cursor.fetchall()
@@ -255,7 +253,7 @@ async def history(message: types.Message):
     await message.answer(text)
 
 # ================= ADMIN PRICE =================
-@dp.message(lambda m: m.text.startswith("/setprice"))
+@dp.message(F.text.startswith("/setprice"))
 async def set_price(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
@@ -274,4 +272,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
