@@ -108,7 +108,8 @@ def autorenew_keyboard():
             [KeyboardButton(text="Да")],
             [KeyboardButton(text="Нет")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        one_time_keyboard=True  # кнопка исчезает после нажатия
     )
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -342,16 +343,22 @@ async def receive_post(message: types.Message, state: FSMContext):
 
 @dp.message(Order.choosing_autorenew)
 async def autorenew_choice(message: types.Message, state: FSMContext):
-    auto = 1 if message.text == "Да" else 0
+    text = message.text.strip()  # удаляем лишние пробелы
+    if text not in ["Да", "Нет"]:
+        await message.answer("Пожалуйста, выберите кнопку Да или Нет", reply_markup=autorenew_keyboard())
+        return
+
+    auto = 1 if text == "Да" else 0
     data = await state.get_data()
 
-    days = data["days"]
+    days = data.get("days", 1)
     start_date = datetime.fromisoformat(data["start_date"])
     end_date = start_date + timedelta(days=days)
 
     order_id = str(uuid.uuid4())
     amount = PRICE_PER_DAY * days
 
+    # Сохраняем покупку как ожидание оплаты
     cursor.execute("""
         INSERT INTO purchases
         (telegram_id, post_text, start_time, end_time, status, auto_renew)
@@ -368,18 +375,14 @@ async def autorenew_choice(message: types.Message, state: FSMContext):
 
     payment = await create_payment(order_id, amount)
 
-    await message.answer(
-        f"💳 Оплатите закреп: {payment.get('payment_url')}"
-    )
+    await message.answer(f"💳 Оплатите закреп: {payment.get('payment_url')}")
 
-    # Проверка оплаты
+    # Начинаем проверку оплаты
     for _ in range(60):
         paid = await check_payment(order_id)
-
         if paid:
             cursor.execute("""
-                UPDATE purchases 
-                SET status='queued'
+                UPDATE purchases SET status='queued'
                 WHERE telegram_id=? AND status='waiting_payment'
             """, (message.from_user.id,))
             conn.commit()
@@ -391,7 +394,7 @@ async def autorenew_choice(message: types.Message, state: FSMContext):
             """, (message.from_user.id,))
             purchase_id = cursor.fetchone()[0]
 
-            # Проверяем есть ли активный закреп
+            # Если нет активного закрепа — активируем сразу
             cursor.execute("SELECT COUNT(*) FROM purchases WHERE status='active'")
             active_count = cursor.fetchone()[0]
 
@@ -401,7 +404,6 @@ async def autorenew_choice(message: types.Message, state: FSMContext):
                     FROM purchases WHERE id=?
                 """, (purchase_id,))
                 post_text, start_time = cursor.fetchone()
-
                 start_dt = datetime.fromisoformat(start_time)
 
                 if datetime.now() >= start_dt:
@@ -476,6 +478,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
