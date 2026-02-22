@@ -22,8 +22,8 @@ from aiogram.filters.state import State, StatesGroup
 # ================= CONFIG =================
 
 BOT_TOKEN = "ВАШ_ТОКЕН"
-CHAT_ID = -100XXXXXXXXXX
-ADMIN_IDS = [123456789]
+CHAT_ID = -100411379361
+ADMIN_IDS = [411379361]
 
 PALLY_API = "https://ВАШ_API_PALLY"
 PALLY_SHOP_ID = "SHOP_ID"
@@ -461,4 +461,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
