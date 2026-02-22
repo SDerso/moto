@@ -111,20 +111,26 @@ def autorenew_keyboard():
         resize_keyboard=True
     )
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime, timedelta
+
 def date_keyboard():
-    kb = InlineKeyboardMarkup(row_width=2)
     today = datetime.now()
+    buttons = []
+
     for i in range(14):
         d = today + timedelta(days=i)
         status = "🟢"
         if not is_slot_free(d, 1):
             status = "🔴"
-        kb.add(
-            InlineKeyboardButton(
-                text=f"{status} {d.strftime('%d-%m')}",
-                callback_data=f"date_{d.strftime('%Y-%m-%d')}"  # строго строка
-            )
-        )
+
+        # Каждая кнопка в своем ряду
+        buttons.append([InlineKeyboardButton(
+            text=f"{status} {d.strftime('%d-%m')}",
+            callback_data=f"date_{d.strftime('%Y-%m-%d')}"  # строго строка
+        )])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     return kb
 
 # ================= LOGIC =================
@@ -463,6 +469,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
