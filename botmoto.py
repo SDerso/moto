@@ -22,7 +22,7 @@ from aiogram.filters.state import State, StatesGroup
 
 import os
 
-TOKEN = os.getenv("API_TOKEN")  # Telegram Bot Token
+BOT_TOKEN = os.getenv("API_TOKEN")  # Telegram Bot Token
 CHAT_ID = -100411379361  # ID чата для закрепов
 ADMIN_IDS = [411379361]  # список админов
 
@@ -301,4 +301,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
