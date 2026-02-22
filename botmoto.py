@@ -1,17 +1,18 @@
 # =========================
-# BOTMOTO T-BANK FIXED
+# BOTMOTO T-BANK VERSION - Aiogram 3.x
 # Оплата вручную на карту Тинькофф
-# Полная админка, резерв, очередь, уведомления, автоснятие
+# Резерв, очередь, админка, уведомления, автоснятие
 # =========================
 
 import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 import os
+
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters.state import State, StatesGroup
 
 # ================= CONFIG =================
@@ -65,16 +66,24 @@ class Order(StatesGroup):
 
 # ================= KEYBOARDS =================
 def main_menu():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton("📌 Купить закреп"))
-    kb.add(KeyboardButton("🧾 История"))
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📌 Купить закреп")],
+            [KeyboardButton(text="🧾 История")]
+        ],
+        resize_keyboard=True
+    )
     return kb
 
 def days_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton("1 день"))
-    kb.add(KeyboardButton("3 дня"))
-    kb.add(KeyboardButton("7 дней"))
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton("1 день")],
+            [KeyboardButton("3 дня")],
+            [KeyboardButton("7 дней")]
+        ],
+        resize_keyboard=True
+    )
     return kb
 
 def date_keyboard():
@@ -87,24 +96,28 @@ def date_keyboard():
             text=f"{status} {d.strftime('%d-%m')}",
             callback_data=f"date_{d.date()}"
         ))
-    # формируем inline_keyboard по 2 кнопки в ряд
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    
+    # InlineKeyboardMarkup принимает inline_keyboard как list[list[InlineKeyboardButton]]
+    kb_rows = []
     row = []
     for idx, btn in enumerate(buttons, start=1):
         row.append(btn)
         if idx % 2 == 0:
-            kb.inline_keyboard.append(row)
+            kb_rows.append(row)
             row = []
     if row:
-        kb.inline_keyboard.append(row)
+        kb_rows.append(row)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     return kb
 
-def admin_confirmation_keyboard(purchase_id):
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{purchase_id}"),
-        InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{purchase_id}")
-    )
+def admin_confirmation_keyboard(purchase_id: int):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{purchase_id}"),
+            InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{purchase_id}")
+        ]
+    ])
     return kb
 
 # ================= LOGIC =================
@@ -115,7 +128,7 @@ def get_price():
 def is_slot_free(start_date, days):
     end_date = start_date + timedelta(days=days)
     cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE status IN ('waiting_admin','active')")
-    for db_start_str, db_end_str, _ in cursor.fetchall():
+    for db_start_str, db_end_str, status in cursor.fetchall():
         db_start = datetime.fromisoformat(db_start_str)
         db_end = datetime.fromisoformat(db_end_str)
         if not (end_date <= db_start or start_date >= db_end):
@@ -147,7 +160,7 @@ async def activate_purchase(purchase_id):
 async def scheduler():
     while True:
         now = datetime.now()
-        # снять завершившиеся закрепы
+        # Завершенные закрепы
         cursor.execute("SELECT id,telegram_id,end_time,message_id FROM purchases WHERE status='active'")
         for purchase_id, tg_id, end_time_str, message_id in cursor.fetchall():
             end_time = datetime.fromisoformat(end_time_str)
@@ -159,7 +172,7 @@ async def scheduler():
                     pass
                 cursor.execute("UPDATE purchases SET status='finished' WHERE id=?",(purchase_id,))
                 conn.commit()
-        # активировать резервы, если дата наступила
+        # Активируем резервы, если наступило время
         cursor.execute("SELECT id FROM purchases WHERE status='waiting_admin'")
         for purchase_id, in cursor.fetchall():
             await activate_purchase(purchase_id)
@@ -167,7 +180,7 @@ async def scheduler():
 
 # ================= HANDLERS =================
 @dp.message(F.text == "/start")
-async def start(message: types.Message):
+async def start(message: types.Message, state: FSMContext):
     cursor.execute("INSERT OR IGNORE INTO users VALUES(?,?)",(message.from_user.id,message.from_user.username))
     conn.commit()
     await message.answer("🏍 Добро пожаловать в систему закрепов!", reply_markup=main_menu())
@@ -240,7 +253,6 @@ async def cancel_payment(callback: types.CallbackQuery):
     await callback.message.edit_text("❌ Оплата не подтверждена. Резерв снят.")
     await callback.answer()
 
-# ================= USER HISTORY =================
 @dp.message(F.text == "🧾 История")
 async def history(message: types.Message):
     cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE telegram_id=?",(message.from_user.id,))
@@ -273,4 +285,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
