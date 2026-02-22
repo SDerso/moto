@@ -1,8 +1,4 @@
-# =========================
-# BOTMOTO T-BANK VERSION - Aiogram 3.x
-# Оплата вручную на карту Тинькофф
-# Резерв, очередь, админка, уведомления, автоснятие
-# =========================
+# botmoto_tbank_fixed_v2.py
 
 import asyncio
 import sqlite3
@@ -10,15 +6,15 @@ from datetime import datetime, timedelta
 import os
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.context import FSMContext
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
 from aiogram.filters.state import State, StatesGroup
 
 # ================= CONFIG =================
-BOT_TOKEN = os.getenv("API_TOKEN")
-CHAT_ID = -100411379361
-ADMIN_IDS = [411379361]
+BOT_TOKEN = os.getenv("API_TOKEN")  # вставьте сюда токен
+CHAT_ID = -100411379361  # чат для закрепов
+ADMIN_IDS = [411379361]  # ID админа
 PRICE_PER_DAY = 100
 
 # ================= INIT BOT =================
@@ -55,7 +51,7 @@ CREATE TABLE IF NOT EXISTS settings(
     price_per_day INTEGER
 )
 """)
-cursor.execute("INSERT OR IGNORE INTO settings(id, price_per_day) VALUES(1,?)",(PRICE_PER_DAY,))
+cursor.execute("INSERT OR IGNORE INTO settings(id, price_per_day) VALUES(1,?)", (PRICE_PER_DAY,))
 conn.commit()
 
 # ================= FSM =================
@@ -66,25 +62,23 @@ class Order(StatesGroup):
 
 # ================= KEYBOARDS =================
 def main_menu():
-    kb = ReplyKeyboardMarkup(
+    return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📌 Купить закреп")],
             [KeyboardButton(text="🧾 История")]
         ],
         resize_keyboard=True
     )
-    return kb
 
 def days_keyboard():
-    kb = ReplyKeyboardMarkup(
+    return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton("1 день")],
-            [KeyboardButton("3 дня")],
-            [KeyboardButton("7 дней")]
+            [KeyboardButton(text="1 день")],
+            [KeyboardButton(text="3 дня")],
+            [KeyboardButton(text="7 дней")]
         ],
         resize_keyboard=True
     )
-    return kb
 
 def date_keyboard():
     today = datetime.now()
@@ -97,54 +91,53 @@ def date_keyboard():
             callback_data=f"date_{d.date()}"
         ))
     
-    # InlineKeyboardMarkup принимает inline_keyboard как list[list[InlineKeyboardButton]]
-    kb_rows = []
+    # Формируем ряд по 2 кнопки
+    rows = []
     row = []
     for idx, btn in enumerate(buttons, start=1):
         row.append(btn)
         if idx % 2 == 0:
-            kb_rows.append(row)
+            rows.append(row)
             row = []
     if row:
-        kb_rows.append(row)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-    return kb
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def admin_confirmation_keyboard(purchase_id: int):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{purchase_id}"),
-            InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{purchase_id}")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{purchase_id}"),
+                InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{purchase_id}")
+            ]
         ]
-    ])
-    return kb
+    )
 
 # ================= LOGIC =================
-def get_price():
+def get_price() -> int:
     cursor.execute("SELECT price_per_day FROM settings WHERE id=1")
     return cursor.fetchone()[0]
 
-def is_slot_free(start_date, days):
+def is_slot_free(start_date: datetime, days: int) -> bool:
     end_date = start_date + timedelta(days=days)
     cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE status IN ('waiting_admin','active')")
-    for db_start_str, db_end_str, status in cursor.fetchall():
+    for db_start_str, db_end_str, _ in cursor.fetchall():
         db_start = datetime.fromisoformat(db_start_str)
         db_end = datetime.fromisoformat(db_end_str)
         if not (end_date <= db_start or start_date >= db_end):
             return False
     return True
 
-def add_purchase_reserve(telegram_id, post_text, start_time, end_time):
+def add_purchase_reserve(telegram_id: int, post_text: str, start_time: datetime, end_time: datetime) -> int:
     cursor.execute("""
         INSERT INTO purchases(telegram_id, post_text, start_time, end_time, status)
         VALUES(?,?,?,?,?)
-    """,(telegram_id, post_text, start_time.isoformat(), end_time.isoformat(), "waiting_admin"))
+    """, (telegram_id, post_text, start_time.isoformat(), end_time.isoformat(), "waiting_admin"))
     conn.commit()
     return cursor.lastrowid
 
-async def activate_purchase(purchase_id):
-    cursor.execute("SELECT post_text,start_time,end_time FROM purchases WHERE id=?",(purchase_id,))
+async def activate_purchase(purchase_id: int):
+    cursor.execute("SELECT post_text,start_time,end_time FROM purchases WHERE id=?", (purchase_id,))
     row = cursor.fetchone()
     if not row:
         return
@@ -154,36 +147,33 @@ async def activate_purchase(purchase_id):
     if datetime.now() >= start_time:
         msg = await bot.send_message(CHAT_ID, post_text)
         await bot.pin_chat_message(CHAT_ID, msg.message_id)
-        cursor.execute("UPDATE purchases SET status='active', message_id=? WHERE id=?",(msg.message_id,purchase_id))
+        cursor.execute("UPDATE purchases SET status='active', message_id=? WHERE id=?", (msg.message_id, purchase_id))
         conn.commit()
 
 async def scheduler():
     while True:
         now = datetime.now()
-        # Завершенные закрепы
+        # Снять завершившиеся закрепы
         cursor.execute("SELECT id,telegram_id,end_time,message_id FROM purchases WHERE status='active'")
         for purchase_id, tg_id, end_time_str, message_id in cursor.fetchall():
             end_time = datetime.fromisoformat(end_time_str)
             if now >= end_time:
                 try:
                     await bot.unpin_chat_message(CHAT_ID, message_id)
-                    await bot.send_message(tg_id,"⏰ Ваш закреп закончился")
+                    await bot.send_message(tg_id, "⏰ Ваш закреп закончился")
                 except:
                     pass
-                cursor.execute("UPDATE purchases SET status='finished' WHERE id=?",(purchase_id,))
+                cursor.execute("UPDATE purchases SET status='finished' WHERE id=?", (purchase_id,))
                 conn.commit()
-        # Активируем резервы, если наступило время
-        cursor.execute("SELECT id FROM purchases WHERE status='waiting_admin'")
-        for purchase_id, in cursor.fetchall():
-            await activate_purchase(purchase_id)
         await asyncio.sleep(60)
 
 # ================= HANDLERS =================
 @dp.message(F.text == "/start")
 async def start(message: types.Message, state: FSMContext):
-    cursor.execute("INSERT OR IGNORE INTO users VALUES(?,?)",(message.from_user.id,message.from_user.username))
+    cursor.execute("INSERT OR IGNORE INTO users VALUES(?,?)", (message.from_user.id, message.from_user.username))
     conn.commit()
     await message.answer("🏍 Добро пожаловать в систему закрепов!", reply_markup=main_menu())
+    await state.clear()
 
 @dp.message(F.text == "📌 Купить закреп")
 async def buy(message: types.Message, state: FSMContext):
@@ -236,26 +226,26 @@ async def receive_post(message: types.Message, state: FSMContext):
 async def confirm_payment(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[1])
     await activate_purchase(purchase_id)
-    cursor.execute("SELECT telegram_id FROM purchases WHERE id=?",(purchase_id,))
+    cursor.execute("SELECT telegram_id FROM purchases WHERE id=?", (purchase_id,))
     tg_id = cursor.fetchone()[0]
-    await bot.send_message(tg_id,"✅ Ваша оплата подтверждена. Закреп активирован.")
+    await bot.send_message(tg_id, "✅ Ваша оплата подтверждена. Закреп активирован.")
     await callback.message.edit_text("✅ Оплата подтверждена. Закреп активирован")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("cancel_"))
 async def cancel_payment(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[1])
-    cursor.execute("SELECT telegram_id FROM purchases WHERE id=?",(purchase_id,))
+    cursor.execute("SELECT telegram_id FROM purchases WHERE id=?", (purchase_id,))
     tg_id = cursor.fetchone()[0]
-    cursor.execute("UPDATE purchases SET status='cancelled' WHERE id=?",(purchase_id,))
+    cursor.execute("UPDATE purchases SET status='cancelled' WHERE id=?", (purchase_id,))
     conn.commit()
-    await bot.send_message(tg_id,"❌ Оплата не подтверждена. Резерв снят.")
+    await bot.send_message(tg_id, "❌ Оплата не подтверждена. Резерв снят.")
     await callback.message.edit_text("❌ Оплата не подтверждена. Резерв снят.")
     await callback.answer()
 
 @dp.message(F.text == "🧾 История")
 async def history(message: types.Message):
-    cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE telegram_id=?",(message.from_user.id,))
+    cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE telegram_id=?", (message.from_user.id,))
     rows = cursor.fetchall()
     if not rows:
         await message.answer("История пуста")
@@ -265,14 +255,13 @@ async def history(message: types.Message):
         text += f"{r[0][:10]} - {r[1][:10]} | {r[2]}\n"
     await message.answer(text)
 
-# ================= ADMIN PRICE =================
 @dp.message(F.text.startswith("/setprice"))
 async def set_price(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     try:
         price = int(message.text.split()[1])
-        cursor.execute("UPDATE settings SET price_per_day=? WHERE id=1",(price,))
+        cursor.execute("UPDATE settings SET price_per_day=? WHERE id=1", (price,))
         conn.commit()
         await message.answer(f"💰 Новая цена за день: {price}")
     except:
