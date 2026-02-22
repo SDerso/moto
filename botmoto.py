@@ -65,16 +65,17 @@ class Order(StatesGroup):
 
 # ================= KEYBOARDS =================
 def main_menu():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton("📌 Купить закреп")],[KeyboardButton("🧾 История")]],
-        resize_keyboard=True
-    )
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton("📌 Купить закреп"))
+    kb.add(KeyboardButton("🧾 История"))
+    return kb
 
 def days_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton("1 день")],[KeyboardButton("3 дня")],[KeyboardButton("7 дней")]],
-        resize_keyboard=True
-    )
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton("1 день"))
+    kb.add(KeyboardButton("3 дня"))
+    kb.add(KeyboardButton("7 дней"))
+    return kb
 
 def date_keyboard():
     today = datetime.now()
@@ -272,3 +273,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
