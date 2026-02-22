@@ -112,7 +112,7 @@ def autorenew_keyboard():
     )
 
 def date_keyboard():
-    kb = InlineKeyboardMarkup()
+    kb = InlineKeyboardMarkup(row_width=2)
     today = datetime.now()
     for i in range(14):
         d = today + timedelta(days=i)
@@ -122,7 +122,7 @@ def date_keyboard():
         kb.add(
             InlineKeyboardButton(
                 text=f"{status} {d.strftime('%d-%m')}",
-                callback_data=f"date_{d.date()}"
+                callback_data=f"date_{d.strftime('%Y-%m-%d')}"  # строго строка
             )
         )
     return kb
@@ -463,6 +463,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
