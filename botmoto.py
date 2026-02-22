@@ -1,221 +1,426 @@
-# botmoto.py
-import asyncio, aiohttp, uuid
+# =========================
+# BOTMOTO PRO VERSION
+# SQLite + Queue + AutoRenew + Notifications + Admin + Pally
+# Compatible with BotHost
+# =========================
+
+import asyncio
+import sqlite3
+import uuid
+import aiohttp
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.filters.state import State, StatesGroup
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, select
 
-# ===================== CONFIG =====================
+# ================= CONFIG =================
+
 BOT_TOKEN = "ВАШ_ТОКЕН"
-CHAT_ID = -1001234567890
-ADMIN_IDS = [123456789,987654321]
+CHAT_ID = -100XXXXXXXXXX
+ADMIN_IDS = [123456789]
 
-PALLY_SHOP_ID = "ВАШ_SHОП_ID"
-PALLY_SECRET_KEY = "ВАШ_СЕКРЕТ"
-PALLY_POLLING_INTERVAL = 30  # секунд
+PALLY_API = "https://ВАШ_API_PALLY"
+PALLY_SHOP_ID = "SHOP_ID"
+PALLY_SECRET = "SECRET_KEY"
 
-# ===================== DATABASE =====================
-engine = create_async_engine("sqlite+aiosqlite:///botmoto.db", echo=False)
-Session = async_sessionmaker(engine, expire_on_commit=False)
+PRICE_PER_DAY = 500
 
-class Base(DeclarativeBase):
-    pass
+# ==========================================
 
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
-    telegram_id = Column(Integer, unique=True)
-    username = Column(String)
-    is_admin = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class Tariff(Base):
-    __tablename__ = "tariffs"
-    id = Column(Integer, primary_key=True)
-    days = Column(Integer)
-    price = Column(Integer)
-    is_active = Column(Boolean, default=True)
-
-class Purchase(Base):
-    __tablename__ = "purchases"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    days = Column(Integer)
-    price = Column(Integer)
-    status = Column(String, default="pending") # pending/paid/active/completed
-    payment_id = Column(String)
-    post_text = Column(String, nullable=True)
-    start_time = Column(DateTime, nullable=True)
-    end_time = Column(DateTime, nullable=True)
-    message_id = Column(Integer, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class Queue(Base):
-    __tablename__ = "queue"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    purchase_id = Column(Integer, ForeignKey("purchases.id"))
-    status = Column(String, default="waiting") # waiting/active/completed
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-# ===================== BOT & FSM =====================
 bot = Bot(BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
-scheduler = AsyncIOScheduler()
+dp = Dispatcher(storage=MemoryStorage())
 
-class OrderStates(StatesGroup):
-    choosing_tariff = State()
+# ================= DATABASE =================
+
+conn = sqlite3.connect("botmoto.db")
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users(
+    telegram_id INTEGER PRIMARY KEY,
+    username TEXT
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS purchases(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER,
+    post_text TEXT,
+    start_time TEXT,
+    end_time TEXT,
+    status TEXT,
+    message_id INTEGER,
+    auto_renew INTEGER DEFAULT 0,
+    notified INTEGER DEFAULT 0
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS queue(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    purchase_id INTEGER,
+    created_at TEXT
+)
+""")
+
+conn.commit()
+
+# ================= FSM =================
+
+class Order(StatesGroup):
+    choosing_days = State()
     choosing_date = State()
     writing_post = State()
-    waiting_payment = State()
+    choosing_autorenew = State()
 
-# ===================== KEYBOARDS =====================
+# ================= KEYBOARDS =================
+
 def main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton("📌 Купить закреп")],
-            [KeyboardButton("🧾 История")],
-            [KeyboardButton("🗓 Выбор даты")]
-        ], resize_keyboard=True
+            [KeyboardButton(text="📌 Купить закреп")],
+            [KeyboardButton(text="🧾 История")],
+            [KeyboardButton(text="⚙ Автопродление")]
+        ],
+        resize_keyboard=True
     )
 
-def admin_menu():
+def days_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton("👥 Пользователи"), KeyboardButton("💰 Тарифы")],
-            [KeyboardButton("📊 Статистика")]
-        ], resize_keyboard=True
+            [KeyboardButton(text="1 день")],
+            [KeyboardButton(text="3 дня")],
+            [KeyboardButton(text="7 дней")]
+        ],
+        resize_keyboard=True
     )
 
-def date_keyboard(start_date: datetime, days=14):
-    kb = InlineKeyboardMarkup(row_width=3)
-    for i in range(days):
-        d = start_date + timedelta(days=i)
-        kb.add(InlineKeyboardButton(d.strftime("%d-%m-%Y"), callback_data=f"date_{d.date()}"))
+def autorenew_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Да")],
+            [KeyboardButton(text="Нет")]
+        ],
+        resize_keyboard=True
+    )
+
+def date_keyboard():
+    kb = InlineKeyboardMarkup()
+    today = datetime.now()
+    for i in range(14):
+        d = today + timedelta(days=i)
+        status = "🟢"
+        if not is_slot_free(d, 1):
+            status = "🔴"
+        kb.add(
+            InlineKeyboardButton(
+                text=f"{status} {d.strftime('%d-%m')}",
+                callback_data=f"date_{d.date()}"
+            )
+        )
     return kb
 
-# ===================== UTILS =====================
-async def create_payment(order_id: str, amount: int):
-    # Симуляция Pally API, заменить на реальный endpoint
-    return {"payment_url": f"https://pally.example/pay/{order_id}", "payment_id": order_id}
+# ================= LOGIC =================
 
-async def poll_payments():
+def is_slot_free(start_date, days):
+    end_date = start_date + timedelta(days=days)
+    cursor.execute("SELECT start_time,end_time FROM purchases WHERE status='active'")
+    rows = cursor.fetchall()
+    for row in rows:
+        db_start = datetime.fromisoformat(row[0])
+        db_end = datetime.fromisoformat(row[1])
+        if not (end_date <= db_start or start_date >= db_end):
+            return False
+    return True
+
+def add_to_queue(purchase_id):
+    cursor.execute(
+        "INSERT INTO queue(purchase_id,created_at) VALUES(?,?)",
+        (purchase_id, datetime.now().isoformat())
+    )
+    conn.commit()
+
+async def activate_next():
+    cursor.execute("SELECT id,purchase_id FROM queue ORDER BY id ASC LIMIT 1")
+    row = cursor.fetchone()
+    if not row:
+        return
+    queue_id, purchase_id = row
+    cursor.execute("SELECT * FROM purchases WHERE id=?", (purchase_id,))
+    purchase = cursor.fetchone()
+    if not purchase:
+        return
+    post_text = purchase[2]
+    start_time = datetime.fromisoformat(purchase[3])
+    end_time = datetime.fromisoformat(purchase[4])
+
+    msg = await bot.send_message(CHAT_ID, post_text)
+    await bot.pin_chat_message(CHAT_ID, msg.message_id)
+
+    cursor.execute(
+        "UPDATE purchases SET status='active', message_id=? WHERE id=?",
+        (msg.message_id, purchase_id)
+    )
+    cursor.execute("DELETE FROM queue WHERE id=?", (queue_id,))
+    conn.commit()
+
+# ================= PAYMENT =================
+
+async def create_payment(order_id, amount):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(PALLY_API, json={
+            "shop_id": PALLY_SHOP_ID,
+            "order_id": order_id,
+            "amount": amount,
+            "secret": PALLY_SECRET
+        }) as resp:
+            return await resp.json()
+            # ================= PAYMENT CHECKER =================
+
+async def check_payment(order_id):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{PALLY_API}/check", params={
+            "shop_id": PALLY_SHOP_ID,
+            "order_id": order_id,
+            "secret": PALLY_SECRET
+        }) as resp:
+            data = await resp.json()
+            return data.get("status") == "paid"
+
+
+# ================= BACKGROUND TASK =================
+
+async def scheduler():
     while True:
-        async with Session() as session:
-            pending = await session.execute(select(Purchase).where(Purchase.status=="pending"))
-            for p in pending.scalars():
-                # Симулируем оплату через API
-                # В реальности проверка Pally
-                p.status = "paid"
-                await session.commit()
-                await activate_queue()
-        await asyncio.sleep(PALLY_POLLING_INTERVAL)
+        now = datetime.now()
 
-async def activate_queue():
-    async with Session() as session:
-        queue_item = await session.execute(select(Queue).where(Queue.status=="waiting").order_by(Queue.created_at))
-        queue_item = queue_item.scalars().first()
-        if not queue_item:
-            return
-        purchase = await session.get(Purchase, queue_item.purchase_id)
-        if purchase.status != "active":
-            msg = await bot.send_message(CHAT_ID, purchase.post_text)
-            await bot.pin_chat_message(CHAT_ID, msg.message_id)
-            purchase.message_id = msg.message_id
-            purchase.status = "active"
-            queue_item.status = "active"
-            await session.commit()
-            schedule_unpin(purchase)
+        # Уведомления за 12 часов
+        cursor.execute("""
+        SELECT id, telegram_id, end_time, notified 
+        FROM purchases 
+        WHERE status='active'
+        """)
+        rows = cursor.fetchall()
 
-def schedule_unpin(purchase):
-    scheduler.add_job(
-        unpin_purchase,
-        "date",
-        run_date=purchase.end_time,
-        args=[purchase.id]
+        for row in rows:
+            purchase_id, tg_id, end_time, notified = row
+            end_time_dt = datetime.fromisoformat(end_time)
+
+            if not notified and end_time_dt - now <= timedelta(hours=12):
+                try:
+                    await bot.send_message(
+                        tg_id,
+                        "⏰ Ваш закреп заканчивается через 12 часов!"
+                    )
+                except:
+                    pass
+                cursor.execute(
+                    "UPDATE purchases SET notified=1 WHERE id=?",
+                    (purchase_id,)
+                )
+                conn.commit()
+
+            # Если срок вышел
+            if now >= end_time_dt:
+                cursor.execute(
+                    "SELECT message_id, auto_renew FROM purchases WHERE id=?",
+                    (purchase_id,)
+                )
+                data = cursor.fetchone()
+                message_id, auto_renew = data
+
+                try:
+                    await bot.unpin_chat_message(CHAT_ID, message_id)
+                except:
+                    pass
+
+                if auto_renew:
+                    new_end = end_time_dt + timedelta(days=1)
+                    cursor.execute("""
+                        UPDATE purchases
+                        SET end_time=?, notified=0
+                        WHERE id=?
+                    """, (new_end.isoformat(), purchase_id))
+                    conn.commit()
+                else:
+                    cursor.execute("""
+                        UPDATE purchases
+                        SET status='finished'
+                        WHERE id=?
+                    """, (purchase_id,))
+                    conn.commit()
+                    await activate_next()
+
+        await asyncio.sleep(60)
+
+
+# ================= COMMANDS =================
+
+@dp.message(F.text == "/start")
+async def start(message: types.Message):
+    cursor.execute(
+        "INSERT OR IGNORE INTO users VALUES(?,?)",
+        (message.from_user.id, message.from_user.username)
+    )
+    conn.commit()
+
+    await message.answer(
+        "🏍 Добро пожаловать в систему закрепов!",
+        reply_markup=main_menu()
     )
 
-async def unpin_purchase(purchase_id:int):
-    async with Session() as session:
-        purchase = await session.get(Purchase, purchase_id)
-        if purchase and purchase.status=="active":
-            try:
-                await bot.unpin_chat_message(CHAT_ID, purchase.message_id)
-            except:
-                pass
-            purchase.status="completed"
-            await session.commit()
-            await activate_queue()
 
-# ===================== HANDLERS =====================
-@dp.message()
-async def start(message: types.Message, state: FSMContext):
-    async with Session() as session:
-        user = await session.execute(select(User).where(User.telegram_id==message.from_user.id))
-        if not user.scalars().first():
-            session.add(User(telegram_id=message.from_user.id, username=message.from_user.username))
-            await session.commit()
-    await message.answer("Добро пожаловать!", reply_markup=main_menu())
-
-@dp.message(lambda m: m.text=="📌 Купить закреп")
+@dp.message(F.text == "📌 Купить закреп")
 async def buy(message: types.Message, state: FSMContext):
-    async with Session() as session:
-        tariffs = await session.execute(select(Tariff).where(Tariff.is_active))
-        tariffs = tariffs.scalars().all()
-        text = "Выберите тариф:\n"
-        for t in tariffs:
-            text+=f"{t.id}. {t.days} дней — {t.price}₽\n"
-        await message.answer(text)
-    await state.set_state(OrderStates.choosing_tariff)
+    await message.answer(
+        f"💰 Цена за 1 день: {PRICE_PER_DAY} руб\nВыберите срок:",
+        reply_markup=days_keyboard()
+    )
+    await state.set_state(Order.choosing_days)
 
-@dp.message(OrderStates.choosing_tariff)
-async def tariff_chosen(message: types.Message, state: FSMContext):
-    await state.update_data(tariff_id=int(message.text))
-    kb = date_keyboard(datetime.now(), days=14)
-    await message.answer("Выберите дату для закрепа:", reply_markup=kb)
-    await state.set_state(OrderStates.choosing_date)
 
-@dp.callback_query(lambda c: c.data.startswith("date_"), state=OrderStates.choosing_date)
-async def date_chosen(call: types.CallbackQuery, state: FSMContext):
-    date_str = call.data.split("_")[1]
-    date_obj = datetime.fromisoformat(date_str)
-    await state.update_data(start_date=date_obj)
-    await call.message.answer("Отправьте текст поста для закрепа:")
-    await state.set_state(OrderStates.writing_post)
+@dp.message(Order.choosing_days)
+async def choose_days(message: types.Message, state: FSMContext):
+    days = int(message.text.split()[0])
+    await state.update_data(days=days)
+    await message.answer("📅 Выберите дату начала:", reply_markup=date_keyboard())
+    await state.set_state(Order.choosing_date)
 
-@dp.message(OrderStates.writing_post)
-async def post_written(message: types.Message, state: FSMContext):
+
+@dp.callback_query(F.data.startswith("date_"))
+async def choose_date(callback: types.CallbackQuery, state: FSMContext):
+    date_str = callback.data.split("_")[1]
+    start_date = datetime.fromisoformat(date_str)
+
     data = await state.get_data()
-    tariff_id = data["tariff_id"]
-    start_date = data["start_date"]
-    post_text = message.text
-    async with Session() as session:
-        tariff = await session.get(Tariff, tariff_id)
-        purchase = Purchase(user_id=message.from_user.id, days=tariff.days, price=tariff.price,
-                            post_text=post_text, start_time=start_date, end_time=start_date+timedelta(days=tariff.days))
-        await session.merge(purchase)
-        await session.commit()
-        order_id=str(uuid.uuid4())
-        payment = await create_payment(order_id, tariff.price)
-        purchase.payment_id=payment["payment_id"]
-        await session.commit()
-    await message.answer(f"Оплата: {payment['payment_url']}")
-    await state.set_state(OrderStates.waiting_payment)
+    days = data["days"]
 
-# ===================== MAIN =====================
+    if not is_slot_free(start_date, days):
+        await callback.answer("❌ Эти даты заняты", show_alert=True)
+        return
+
+    await state.update_data(start_date=start_date.isoformat())
+    await callback.message.answer("✍ Отправьте текст поста")
+    await state.set_state(Order.writing_post)
+
+
+@dp.message(Order.writing_post)
+async def receive_post(message: types.Message, state: FSMContext):
+    await state.update_data(post_text=message.text)
+    await message.answer("🔄 Включить автопродление?", reply_markup=autorenew_keyboard())
+    await state.set_state(Order.choosing_autorenew)
+
+
+@dp.message(Order.choosing_autorenew)
+async def autorenew_choice(message: types.Message, state: FSMContext):
+    auto = 1 if message.text == "Да" else 0
+    data = await state.get_data()
+
+    days = data["days"]
+    start_date = datetime.fromisoformat(data["start_date"])
+    end_date = start_date + timedelta(days=days)
+
+    order_id = str(uuid.uuid4())
+    amount = PRICE_PER_DAY * days
+
+    cursor.execute("""
+        INSERT INTO purchases
+        (telegram_id, post_text, start_time, end_time, status, auto_renew)
+        VALUES(?,?,?,?,?,?)
+    """, (
+        message.from_user.id,
+        data["post_text"],
+        start_date.isoformat(),
+        end_date.isoformat(),
+        "waiting_payment",
+        auto
+    ))
+    conn.commit()
+
+    payment = await create_payment(order_id, amount)
+
+    await message.answer(
+        f"💳 Оплатите закреп: {payment.get('payment_url')}"
+    )
+
+    # Проверка оплаты
+    for _ in range(60):
+        paid = await check_payment(order_id)
+        if paid:
+            cursor.execute("""
+                UPDATE purchases SET status='queued'
+                WHERE telegram_id=? AND status='waiting_payment'
+            """, (message.from_user.id,))
+            conn.commit()
+
+            cursor.execute("""
+                SELECT id FROM purchases 
+                WHERE telegram_id=? 
+                ORDER BY id DESC LIMIT 1
+            """, (message.from_user.id,))
+            purchase_id = cursor.fetchone()[0]
+
+            add_to_queue(purchase_id)
+
+            await message.answer("✅ Оплата прошла. Вы добавлены в очередь.")
+            break
+
+        await asyncio.sleep(10)
+
+    await state.clear()
+
+
+@dp.message(F.text == "🧾 История")
+async def history(message: types.Message):
+    cursor.execute("""
+        SELECT start_time,end_time,status
+        FROM purchases
+        WHERE telegram_id=?
+    """, (message.from_user.id,))
+    rows = cursor.fetchall()
+
+    if not rows:
+        await message.answer("История пуста")
+        return
+
+    text = "🧾 Ваша история:\n\n"
+    for r in rows:
+        text += f"{r[0][:10]} - {r[1][:10]} | {r[2]}\n"
+
+    await message.answer(text)
+
+
+# ================= ADMIN =================
+
+@dp.message(F.text.startswith("/admin"))
+async def admin_panel(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await message.answer("⚙ Админ панель:\n/setprice 700")
+
+
+@dp.message(F.text.startswith("/setprice"))
+async def set_price(message: types.Message):
+    global PRICE_PER_DAY
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    PRICE_PER_DAY = int(message.text.split()[1])
+    await message.answer(f"💰 Новая цена: {PRICE_PER_DAY}")
+
+
+# ================= START =================
+
 async def main():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    scheduler.start()
-    asyncio.create_task(poll_payments())
+    asyncio.create_task(scheduler())
     await dp.start_polling(bot)
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     asyncio.run(main())
