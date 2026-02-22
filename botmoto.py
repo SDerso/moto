@@ -131,7 +131,11 @@ def date_keyboard():
 
 def is_slot_free(start_date, days):
     end_date = start_date + timedelta(days=days)
-    cursor.execute("SELECT start_time,end_time FROM purchases WHERE status='active'")
+    cursor.execute("""
+    SELECT start_time, end_time 
+    FROM purchases 
+    WHERE status IN ('active','queued','waiting_payment')
+""")
     rows = cursor.fetchall()
     for row in rows:
         db_start = datetime.fromisoformat(row[0])
@@ -148,28 +152,33 @@ def add_to_queue(purchase_id):
     conn.commit()
 
 async def activate_next():
-    cursor.execute("SELECT id,purchase_id FROM queue ORDER BY id ASC LIMIT 1")
-    row = cursor.fetchone()
-    if not row:
-        return
-    queue_id, purchase_id = row
-    cursor.execute("SELECT * FROM purchases WHERE id=?", (purchase_id,))
-    purchase = cursor.fetchone()
-    if not purchase:
-        return
-    post_text = purchase[2]
-    start_time = datetime.fromisoformat(purchase[3])
-    end_time = datetime.fromisoformat(purchase[4])
+    now = datetime.now()
 
-    msg = await bot.send_message(CHAT_ID, post_text)
-    await bot.pin_chat_message(CHAT_ID, msg.message_id)
+    cursor.execute("""
+        SELECT q.id, p.id, p.post_text, p.start_time, p.end_time
+        FROM queue q
+        JOIN purchases p ON q.purchase_id = p.id
+        ORDER BY q.id ASC
+    """)
+    rows = cursor.fetchall()
 
-    cursor.execute(
-        "UPDATE purchases SET status='active', message_id=? WHERE id=?",
-        (msg.message_id, purchase_id)
-    )
-    cursor.execute("DELETE FROM queue WHERE id=?", (queue_id,))
-    conn.commit()
+    for row in rows:
+        queue_id, purchase_id, post_text, start_time, end_time = row
+        start_dt = datetime.fromisoformat(start_time)
+
+        if now >= start_dt:
+            msg = await bot.send_message(CHAT_ID, post_text)
+            await bot.pin_chat_message(CHAT_ID, msg.message_id)
+
+            cursor.execute("""
+                UPDATE purchases
+                SET status='active', message_id=?
+                WHERE id=?
+            """, (msg.message_id, purchase_id))
+
+            cursor.execute("DELETE FROM queue WHERE id=?", (queue_id,))
+            conn.commit()
+            break
 
 # ================= PAYMENT =================
 
@@ -367,9 +376,37 @@ async def autorenew_choice(message: types.Message, state: FSMContext):
             """, (message.from_user.id,))
             purchase_id = cursor.fetchone()[0]
 
-            add_to_queue(purchase_id)
+            cursor.execute("SELECT COUNT(*) FROM purchases WHERE status='active'")
+active_count = cursor.fetchone()[0]
 
-            await message.answer("✅ Оплата прошла. Вы добавлены в очередь.")
+if active_count == 0:
+    cursor.execute("""
+        SELECT post_text, start_time, end_time 
+        FROM purchases WHERE id=?
+    """, (purchase_id,))
+    p = cursor.fetchone()
+
+    post_text, start_time, end_time = p
+    start_dt = datetime.fromisoformat(start_time)
+
+    if datetime.now() >= start_dt:
+        msg = await bot.send_message(CHAT_ID, post_text)
+        await bot.pin_chat_message(CHAT_ID, msg.message_id)
+
+        cursor.execute("""
+            UPDATE purchases
+            SET status='active', message_id=?
+            WHERE id=?
+        """, (msg.message_id, purchase_id))
+        conn.commit()
+
+        await message.answer("✅ Оплата прошла. Закреп активирован.")
+    else:
+        add_to_queue(purchase_id)
+        await message.answer("✅ Оплата прошла. Добавлено в очередь.")
+else:
+    add_to_queue(purchase_id)
+    await message.answer("✅ Оплата прошла. Добавлено в очередь.")
             break
 
         await asyncio.sleep(10)
@@ -424,3 +461,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
