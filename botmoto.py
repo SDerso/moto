@@ -20,8 +20,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters.state import State, StatesGroup
 
 # ================= CONFIG =================
-
-BOT_TOKEN = "BOT_API_TOKEN"
+import os
+BOT_TOKEN = os.getenv("BOT_API_TOKEN")
 CHAT_ID = -100411379361
 ADMIN_IDS = [411379361]
 
@@ -463,6 +463,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
