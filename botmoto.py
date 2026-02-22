@@ -76,12 +76,26 @@ def days_keyboard():
     )
 
 def date_keyboard():
-    kb = InlineKeyboardMarkup(row_width=2)
     today = datetime.now()
+    buttons = []
     for i in range(14):
         d = today + timedelta(days=i)
         status = "🟢" if is_slot_free(d, 1) else "🔴"
-        kb.add(InlineKeyboardButton(f"{status} {d.strftime('%d-%m')}", callback_data=f"date_{d.date()}"))
+        buttons.append(InlineKeyboardButton(
+            text=f"{status} {d.strftime('%d-%m')}",
+            callback_data=f"date_{d.date()}"
+        ))
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    # Добавляем кнопки по 2 в ряд
+    row = []
+    for idx, btn in enumerate(buttons, start=1):
+        row.append(btn)
+        if idx % 2 == 0:
+            kb.inline_keyboard.append(row)
+            row = []
+    if row:
+        kb.inline_keyboard.append(row)
     return kb
 
 def admin_confirmation_keyboard(purchase_id):
@@ -260,3 +274,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
