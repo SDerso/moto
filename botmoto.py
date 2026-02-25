@@ -345,37 +345,77 @@ async def receive_post(message: types.Message, state: FSMContext):
 async def user_paid(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[2])
 
-    cursor.execute("SELECT telegram_id FROM purchases WHERE id=?", (purchase_id,))
+    # Получаем данные о заказе
+    cursor.execute("""
+        SELECT telegram_id, post_text, start_time, end_time
+        FROM purchases
+        WHERE id=?
+    """, (purchase_id,))
     row = cursor.fetchone()
-
     if not row:
         await callback.answer("❌ Заказ не найден", show_alert=True)
         return
 
-    user_id = row[0]
+    user_id, post_text, start_str, end_str = row
+    start_date = datetime.fromisoformat(start_str)
+    end_date = datetime.fromisoformat(end_str)
+    days = (end_date - start_date).days
 
+    # Получаем username
     cursor.execute("SELECT username FROM users WHERE telegram_id=?", (user_id,))
     user_row = cursor.fetchone()
     username = user_row[0] if user_row and user_row[0] else "Без username"
 
-    cursor.execute(
-        "UPDATE purchases SET status='waiting_admin' WHERE id=?",
-        (purchase_id,)
-    )
+    # Обновляем статус заказа
+    cursor.execute("UPDATE purchases SET status='waiting_admin' WHERE id=?", (purchase_id,))
     conn.commit()
 
-    for admin_id in ADMIN_IDS:
-        await bot.send_message(
-            admin_id,
-            f"💳 Оплата получена!\n\n"
-            f"👤 Ник: @{username}\n"
-            f"🆔 ID: {user_id}\n"
-            f"📦 Заказ: {purchase_id}",
-            reply_markup=admin_confirmation_keyboard(purchase_id)
-        )
+    # Подготовка текста для админа
+    admin_text = (
+        f"💳 Пользователь оплатил!\n\n"
+        f"👤 Ник: @{username}\n"
+        f"🆔 ID: {user_id}\n"
+        f"📅 Дата: {start_date.date()} - {end_date.date()} ({days} дней)\n"
+        f"📦 Текст поста:\n{post_text}"
+    )
 
+    # Проверим есть ли фото у пользователя (предположим, что они хранятся в БД в отдельной таблице attachments)
+    cursor.execute("SELECT file_id, file_type FROM attachments WHERE purchase_id=? ORDER BY id", (purchase_id,))
+    attachments = cursor.fetchall()
+
+    if attachments:
+        media_group = []
+        for file_id, file_type in attachments:
+            if file_type.startswith("photo"):
+                media_group.append(types.InputMediaPhoto(media=file_id))
+            elif file_type.startswith("video"):
+                media_group.append(types.InputMediaVideo(media=file_id))
+        # Отправляем медиа
+        if media_group:
+            # Первое фото с подписью
+            media_group[0].caption = admin_text
+            media_group[0].parse_mode = "HTML"
+            for admin_id in ADMIN_IDS:
+                await bot.send_media_group(chat_id=admin_id, media=media_group)
+                # Добавим кнопки подтверждения к первому сообщению (через отдельное сообщение)
+                await bot.send_message(
+                    admin_id,
+                    "Выберите действие:",
+                    reply_markup=admin_confirmation_keyboard(purchase_id)
+                )
+    else:
+        # Просто текст
+        for admin_id in ADMIN_IDS:
+            await bot.send_message(
+                admin_id,
+                admin_text,
+                reply_markup=admin_confirmation_keyboard(purchase_id)
+            )
+
+    # Пользователю уведомление
     await callback.message.edit_text("✅ Ожидаем подтверждение администратора.")
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("user_cancel_"))
 async def user_cancel(callback: types.CallbackQuery):
@@ -598,6 +638,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
