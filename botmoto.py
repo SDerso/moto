@@ -76,6 +76,7 @@ def admin_menu_keyboard():
         inline_keyboard=[
             [InlineKeyboardButton(text="⏳ Ожидают подтверждения", callback_data="admin_waiting")],
             [InlineKeyboardButton(text="🟢 Активные", callback_data="admin_active")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
             [InlineKeyboardButton(text="❌ Отменённые", callback_data="admin_cancelled")],
             [InlineKeyboardButton(text="💰 Изменить цену", callback_data="admin_price")]
         ]
@@ -138,6 +139,51 @@ def get_price() -> int:
     cursor.execute("SELECT price_per_day FROM settings WHERE id=1")
     return cursor.fetchone()[0]
 
+def get_total_income():
+    cursor.execute("""
+        SELECT start_time, end_time 
+        FROM purchases 
+        WHERE status IN ('active','finished')
+    """)
+    rows = cursor.fetchall()
+
+    total = 0
+    price = get_price()
+
+    for start_str, end_str in rows:
+        start = datetime.fromisoformat(start_str)
+        end = datetime.fromisoformat(end_str)
+        days = (end - start).days
+        total += days * price
+
+    return total
+
+def get_month_stats():
+    now = datetime.now()
+    month_start = datetime(now.year, now.month, 1)
+
+    cursor.execute("""
+        SELECT start_time, end_time
+        FROM purchases
+        WHERE status IN ('active','finished')
+    """)
+    rows = cursor.fetchall()
+
+    total_income = 0
+    total_sales = 0
+    price = get_price()
+
+    for start_str, end_str in rows:
+        start = datetime.fromisoformat(start_str)
+
+        if start >= month_start:
+            end = datetime.fromisoformat(end_str)
+            days = (end - start).days
+            total_income += days * price
+            total_sales += 1
+
+    return total_sales, total_income
+
 def is_slot_free(start_date: datetime, days: int) -> bool:
     end_date = start_date + timedelta(days=days)
     cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE status IN ('waiting_admin','active')")
@@ -173,19 +219,40 @@ async def activate_purchase(purchase_id: int):
 async def scheduler():
     while True:
         now = datetime.now()
-        # Снять завершившиеся закрепы
-        cursor.execute("SELECT id,telegram_id,end_time,message_id FROM purchases WHERE status='active'")
+
+        # 1️⃣ Активировать ожидающие, если пришло время
+        cursor.execute("""
+            SELECT id, start_time 
+            FROM purchases 
+            WHERE status='waiting_admin'
+        """)
+        for purchase_id, start_time_str in cursor.fetchall():
+            start_time = datetime.fromisoformat(start_time_str)
+            if now >= start_time:
+                await activate_purchase(purchase_id)
+
+        # 2️⃣ Завершить активные
+        cursor.execute("""
+            SELECT id, telegram_id, end_time, message_id 
+            FROM purchases 
+            WHERE status='active'
+        """)
         for purchase_id, tg_id, end_time_str, message_id in cursor.fetchall():
             end_time = datetime.fromisoformat(end_time_str)
             if now >= end_time:
                 try:
                     await bot.unpin_chat_message(CHAT_ID, message_id)
-                    await bot.send_message(tg_id, "⏰ Ваш закреп закончился")
+                    await bot.send_message(tg_id, "⏰ Ваш закреп завершён.")
                 except:
                     pass
-                cursor.execute("UPDATE purchases SET status='finished' WHERE id=?", (purchase_id,))
+
+                cursor.execute(
+                    "UPDATE purchases SET status='finished' WHERE id=?",
+                    (purchase_id,)
+                )
                 conn.commit()
-        await asyncio.sleep(60)
+
+        await asyncio.sleep(30)
 
 # ================= HANDLERS =================
 @dp.message(F.text == "/start")
@@ -358,6 +425,22 @@ async def cancel_payment(callback: types.CallbackQuery):
     await callback.message.edit_text("❌ Оплата не подтверждена. Резерв снят.")
     await callback.answer()
 
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: types.CallbackQuery):
+    total_income = get_total_income()
+    month_sales, month_income = get_month_stats()
+
+    text = (
+        "📊 Статистика\n\n"
+        f"💰 Общий доход: {total_income} руб\n\n"
+        f"📅 За текущий месяц:\n"
+        f"Продаж: {month_sales}\n"
+        f"Доход: {month_income} руб"
+    )
+
+    await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
+    await callback.answer()
+
 @dp.message(F.text == "🧾 История")
 async def history(message: types.Message):
     cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE telegram_id=?", (message.from_user.id,))
@@ -389,4 +472,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
