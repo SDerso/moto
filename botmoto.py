@@ -61,6 +61,26 @@ class Order(StatesGroup):
     writing_post = State()
 
 # ================= KEYBOARDS =================
+def user_payment_keyboard(purchase_id: int):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💳 Я оплатил", callback_data=f"user_paid_{purchase_id}"),
+                InlineKeyboardButton(text="❌ Отказаться", callback_data=f"user_cancel_{purchase_id}")
+            ]
+        ]
+    )
+
+def admin_menu_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⏳ Ожидают подтверждения", callback_data="admin_waiting")],
+            [InlineKeyboardButton(text="🟢 Активные", callback_data="admin_active")],
+            [InlineKeyboardButton(text="❌ Отменённые", callback_data="admin_cancelled")],
+            [InlineKeyboardButton(text="💰 Изменить цену", callback_data="admin_price")]
+        ]
+    )
+
 def main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -212,16 +232,111 @@ async def receive_post(message: types.Message, state: FSMContext):
     start_date = datetime.fromisoformat(data["start_date"])
     end_date = start_date + timedelta(days=days)
     post_text = message.text
-    purchase_id = add_purchase_reserve(message.from_user.id, post_text, start_date, end_date)
-    await message.answer(f"💳 Резерв создан.\n\nОплатите на карту Тинькофф и укажите в примечании:\n'Закреп в ТГ {start_date.date()}'")
+    purchase_id = add_purchase_reserve(
+    message.from_user.id,
+    post_text,
+    start_date,
+    end_date
+)
+
+cursor.execute("UPDATE purchases SET status='waiting_payment' WHERE id=?", (purchase_id,))
+conn.commit()
+
+await message.answer(
+    f"💳 Резерв создан!\n\n"
+    f"Сумма: {days * get_price()} руб\n"
+    f"Оплатите переводом на карту 5536914058801691 Т-Банк.\n"
+    f"После оплаты нажмите кнопку ниже.",
+    reply_markup=user_payment_keyboard(purchase_id)
+)
+@dp.callback_query(F.data.startswith("user_paid_"))
+async def user_paid(callback: types.CallbackQuery):
+    purchase_id = int(callback.data.split("_")[2])
+
+    cursor.execute("UPDATE purchases SET status='waiting_admin' WHERE id=?", (purchase_id,))
+    conn.commit()
+
+    cursor.execute("SELECT telegram_id FROM purchases WHERE id=?", (purchase_id,))
+    user_id = cursor.fetchone()[0]
+
     for admin_id in ADMIN_IDS:
-        await bot.send_message(admin_id,
-            f"📌 Новый заказ резерв:\nКлиент: @{message.from_user.username}\nДата: {start_date.date()}\nТекст:\n{post_text}",
+        await bot.send_message(
+            admin_id,
+            f"💳 Пользователь {user_id} оплатил закреп.\n"
+            f"Проверьте свою карту карту Т-Банка.",
             reply_markup=admin_confirmation_keyboard(purchase_id)
         )
-    await state.clear()
 
+    await callback.message.edit_text("✅ Ожидаем подтверждение администратора.")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("user_cancel_"))
+async def user_cancel(callback: types.CallbackQuery):
+    purchase_id = int(callback.data.split("_")[2])
+
+    cursor.execute("UPDATE purchases SET status='cancelled' WHERE id=?", (purchase_id,))
+    conn.commit()
+
+    for admin_id in ADMIN_IDS:
+        await bot.send_message(
+            admin_id,
+            f"❌ Пользователь отказался от оплаты.\nID заказа: {purchase_id}"
+        )
+
+    await callback.message.edit_text("❌ Вы отменили резерв.")
+    await callback.answer()
 # ================= ADMIN CALLBACK =================
+@dp.message(F.text == "/admin")
+async def admin_panel(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await message.answer("🔧 Админ-панель Мото-Любители", reply_markup=admin_menu_keyboard())
+
+@dp.callback_query(F.data == "admin_waiting")
+async def admin_waiting(callback: types.CallbackQuery):
+    cursor.execute("SELECT id, telegram_id, start_time FROM purchases WHERE status='waiting_admin'")
+    rows = cursor.fetchall()
+
+    if not rows:
+        text = "Нет ожидающих подтверждения."
+    else:
+        text = "⏳ Ожидают подтверждения:\n\n"
+        for r in rows:
+            text += f"ID {r[0]} | Пользователь {r[1]} | {r[2][:10]}\n"
+
+    await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_active")
+async def admin_active(callback: types.CallbackQuery):
+    cursor.execute("SELECT id, telegram_id, end_time FROM purchases WHERE status='active'")
+    rows = cursor.fetchall()
+
+    if not rows:
+        text = "Нет активных закрепов."
+    else:
+        text = "🟢 Активные:\n\n"
+        for r in rows:
+            text += f"ID {r[0]} | Пользователь {r[1]} | до {r[2][:10]}\n"
+
+    await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_cancelled")
+async def admin_cancelled(callback: types.CallbackQuery):
+    cursor.execute("SELECT id, telegram_id FROM purchases WHERE status='cancelled'")
+    rows = cursor.fetchall()
+
+    if not rows:
+        text = "Нет отменённых."
+    else:
+        text = "❌ Отменённые:\n\n"
+        for r in rows:
+            text += f"ID {r[0]} | Пользователь {r[1]}\n"
+
+    await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
+    await callback.answer()
+
 @dp.callback_query(F.data.startswith("confirm_"))
 async def confirm_payment(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[1])
@@ -274,3 +389,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
