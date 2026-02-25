@@ -60,6 +60,8 @@ class Order(StatesGroup):
     choosing_date = State()
     writing_post = State()
 
+class AdminStates(StatesGroup):
+    waiting_new_price = State()
 # ================= KEYBOARDS =================
 def user_payment_keyboard(purchase_id: int):
     return InlineKeyboardMarkup(
@@ -352,6 +354,10 @@ async def user_paid(callback: types.CallbackQuery):
 
     user_id = row[0]
 
+    cursor.execute("SELECT username FROM users WHERE telegram_id=?", (user_id,))
+    user_row = cursor.fetchone()
+    username = user_row[0] if user_row and user_row[0] else "Без username"
+
     cursor.execute(
         "UPDATE purchases SET status='waiting_admin' WHERE id=?",
         (purchase_id,)
@@ -361,8 +367,10 @@ async def user_paid(callback: types.CallbackQuery):
     for admin_id in ADMIN_IDS:
         await bot.send_message(
             admin_id,
-            f"💳 Пользователь {user_id} оплатил закреп.\n"
-            f"Проверьте карту Т-Банка.",
+            f"💳 Оплата получена!\n\n"
+            f"👤 Ник: @{username}\n"
+            f"🆔 ID: {user_id}\n"
+            f"📦 Заказ: {purchase_id}",
             reply_markup=admin_confirmation_keyboard(purchase_id)
         )
 
@@ -391,6 +399,12 @@ async def admin_panel(message: types.Message):
         return
     await message.answer("🔧 Админ-панель Мото-Любители", reply_markup=admin_menu_keyboard())
 
+
+@dp.callback_query(F.data == "admin_menu")
+async def admin_menu_return(callback: types.CallbackQuery):
+    await callback.message.edit_text("🔧 Админ-панель", reply_markup=admin_menu_keyboard())
+    await callback.answer()
+
 @dp.callback_query(F.data == "admin_waiting")
 async def admin_waiting(callback: types.CallbackQuery):
     cursor.execute("SELECT id, telegram_id, start_time FROM purchases WHERE status='waiting_admin'")
@@ -406,6 +420,28 @@ async def admin_waiting(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
     await callback.answer()
 
+@dp.callback_query(F.data == "admin_price")
+async def admin_change_price(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+
+    await callback.message.edit_text("Введите новую цену за день:")
+    await state.set_state(AdminStates.waiting_new_price)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_new_price)
+async def process_new_price(message: types.Message, state: FSMContext):
+    try:
+        new_price = int(message.text)
+        cursor.execute("UPDATE settings SET price_per_day=? WHERE id=1", (new_price,))
+        conn.commit()
+
+        await message.answer(f"✅ Новая цена установлена: {new_price} руб")
+        await state.clear()
+    except:
+        await message.answer("❌ Введите число")
+
+
 @dp.callback_query(F.data == "admin_active")
 async def admin_active(callback: types.CallbackQuery):
     cursor.execute("SELECT id, telegram_id, end_time FROM purchases WHERE status='active'")
@@ -413,12 +449,70 @@ async def admin_active(callback: types.CallbackQuery):
 
     if not rows:
         text = "Нет активных закрепов."
-    else:
-        text = "🟢 Активные:\n\n"
-        for r in rows:
-            text += f"ID {r[0]} | Пользователь {r[1]} | до {r[2][:10]}\n"
+        await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
+        await callback.answer()
+        return
 
-    await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
+    keyboard = []
+    text = "🟢 Активные:\n\n"
+
+    for r in rows:
+        purchase_id = r[0]
+        text += f"ID {purchase_id} | Пользователь {r[1]} | до {r[2][:10]}\n"
+
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"❌ Снять ID {purchase_id}",
+                callback_data=f"admin_unpin_{purchase_id}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="admin_menu")
+    ])
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("admin_unpin_"))
+async def admin_unpin(callback: types.CallbackQuery):
+    purchase_id = int(callback.data.split("_")[2])
+
+    cursor.execute("SELECT message_id, telegram_id FROM purchases WHERE id=?", (purchase_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        await callback.answer("Не найдено", show_alert=True)
+        return
+
+    message_id, user_id = row
+
+    cursor.execute("SELECT chat_id FROM groups WHERE id=1")
+    chat_row = cursor.fetchone()
+
+    if not chat_row:
+        await callback.answer("Группа не установлена", show_alert=True)
+        return
+
+    chat_id = chat_row[0]
+
+    try:
+        await bot.unpin_chat_message(chat_id, message_id)
+    except:
+        pass
+
+    cursor.execute(
+        "UPDATE purchases SET status='finished' WHERE id=?",
+        (purchase_id,)
+    )
+    conn.commit()
+
+    await bot.send_message(user_id, "❌ Ваш закреп был снят администратором.")
+
+    await callback.message.edit_text("Закреп снят.")
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_cancelled")
@@ -504,6 +598,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
