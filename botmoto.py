@@ -80,6 +80,7 @@ def admin_menu_keyboard():
             [InlineKeyboardButton(text="🟢 Активные", callback_data="admin_active")],
             [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
             [InlineKeyboardButton(text="❌ Отменённые", callback_data="admin_cancelled")],
+            [InlineKeyboardButton(text="📌 Снять закреп", callback_data=f"admin_unpin_{purchase_id}")],
             [InlineKeyboardButton(text="💰 Изменить цену", callback_data="admin_price")]
         ]
     )
@@ -521,39 +522,40 @@ async def admin_active(callback: types.CallbackQuery):
 async def admin_unpin(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[2])
 
-    cursor.execute("SELECT message_id, telegram_id FROM purchases WHERE id=?", (purchase_id,))
+    # Получаем информацию о закрепе
+    cursor.execute("SELECT message_id, telegram_id, status FROM purchases WHERE id=?", (purchase_id,))
     row = cursor.fetchone()
-
     if not row:
-        await callback.answer("Не найдено", show_alert=True)
+        await callback.answer("❌ Заказ не найден", show_alert=True)
         return
 
-    message_id, user_id = row
+    message_id, user_id, status = row
 
-    cursor.execute("SELECT chat_id FROM groups WHERE id=1")
-    chat_row = cursor.fetchone()
-
-    if not chat_row:
-        await callback.answer("Группа не установлена", show_alert=True)
+    if status not in ("active", "waiting_admin"):
+        await callback.answer("❌ Этот закреп уже завершён или отменён", show_alert=True)
         return
 
-    chat_id = chat_row[0]
-
+    # Пытаемся снять закреп
     try:
-        await bot.unpin_chat_message(chat_id, message_id)
+        await bot.unpin_chat_message(chat_id=CHAT_ID, message_id=message_id)
+    except Exception as e:
+        await callback.answer(f"❌ Не удалось снять закреп: {e}", show_alert=True)
+        return
+
+    # Обновляем статус в БД
+    cursor.execute("UPDATE purchases SET status='cancelled' WHERE id=?", (purchase_id,))
+    conn.commit()
+
+    # Уведомляем пользователя
+    try:
+        await bot.send_message(user_id, "❌ Ваш закреп был снят администратором.")
     except:
         pass
 
-    cursor.execute(
-        "UPDATE purchases SET status='finished' WHERE id=?",
-        (purchase_id,)
-    )
-    conn.commit()
-
-    await bot.send_message(user_id, "❌ Ваш закреп был снят администратором.")
-
-    await callback.message.edit_text("Закреп снят.")
+    # Подтверждение для админа
+    await callback.message.edit_text(f"❌ Закреп ID {purchase_id} снят")
     await callback.answer()
+
 
 @dp.callback_query(F.data == "admin_cancelled")
 async def admin_cancelled(callback: types.CallbackQuery):
@@ -638,6 +640,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
