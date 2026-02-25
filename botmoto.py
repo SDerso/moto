@@ -97,6 +97,120 @@ def days_keyboard():
         ],
         resize_keyboard=True
     )
+
+def date_keyboard():
+    today = datetime.now()
+    buttons = []
+    for i in range(14):
+        d = today + timedelta(days=i)
+        status = "🟢" if is_slot_free(d, 1) else "🔴"
+        buttons.append(InlineKeyboardButton(
+            text=f"{status} {d.strftime('%d-%m')}",
+            callback_data=f"date_{d.date()}"
+        ))
+
+    rows = []
+    row = []
+    for idx, btn in enumerate(buttons, start=1):
+        row.append(btn)
+        if idx % 2 == 0:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def admin_confirmation_keyboard(purchase_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{purchase_id}"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_{purchase_id}")
+        ]
+    ])
+
+# ================= LOGIC =================
+def get_price() -> int:
+    cursor.execute("SELECT price_per_day FROM settings WHERE id=1")
+    return cursor.fetchone()[0]
+
+def get_total_income():
+    cursor.execute("SELECT start_time, end_time FROM purchases WHERE status IN ('active','finished')")
+    rows = cursor.fetchall()
+    total = 0
+    price = get_price()
+    for start_str, end_str in rows:
+        start = datetime.fromisoformat(start_str)
+        end = datetime.fromisoformat(end_str)
+        total += (end - start).days * price
+    return total
+
+def get_month_stats():
+    now = datetime.now()
+    month_start = datetime(now.year, now.month, 1)
+    cursor.execute("SELECT start_time, end_time FROM purchases WHERE status IN ('active','finished')")
+    rows = cursor.fetchall()
+    total_income = 0
+    total_sales = 0
+    price = get_price()
+    for start_str, end_str in rows:
+        start = datetime.fromisoformat(start_str)
+        if start >= month_start:
+            end = datetime.fromisoformat(end_str)
+            total_income += (end - start).days * price
+            total_sales += 1
+    return total_sales, total_income
+
+def is_slot_free(start_date: datetime, days: int) -> bool:
+    end_date = start_date + timedelta(days=days)
+    cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE status IN ('waiting_admin','active')")
+    for db_start_str, db_end_str, _ in cursor.fetchall():
+        db_start = datetime.fromisoformat(db_start_str)
+        db_end = datetime.fromisoformat(db_end_str)
+        if not (end_date <= db_start or start_date >= db_end):
+            return False
+    return True
+
+def add_purchase_reserve(telegram_id: int, post_text: str, start_time: datetime, end_time: datetime) -> int:
+    cursor.execute("""
+        INSERT INTO purchases(telegram_id, post_text, start_time, end_time, status)
+        VALUES(?,?,?,?,?)
+    """, (telegram_id, post_text, start_time.isoformat(), end_time.isoformat(), "waiting_payment"))
+    conn.commit()
+    return cursor.lastrowid
+
+async def activate_purchase(purchase_id: int):
+    cursor.execute("SELECT post_text,start_time,end_time FROM purchases WHERE id=?", (purchase_id,))
+    row = cursor.fetchone()
+    if not row: return
+    post_text, start_time_str, end_time_str = row
+    start_time = datetime.fromisoformat(start_time_str)
+    end_time = datetime.fromisoformat(end_time_str)
+    if datetime.now() >= start_time:
+        msg = await bot.send_message(CHAT_ID, post_text)
+        await bot.pin_chat_message(CHAT_ID, msg.message_id)
+        cursor.execute("UPDATE purchases SET status='active', message_id=? WHERE id=?", (msg.message_id, purchase_id))
+        conn.commit()
+
+async def scheduler():
+    while True:
+        now = datetime.now()
+        cursor.execute("SELECT id, start_time FROM purchases WHERE status='waiting_admin'")
+        for purchase_id, start_time_str in cursor.fetchall():
+            start_time = datetime.fromisoformat(start_time_str)
+            if now >= start_time:
+                await activate_purchase(purchase_id)
+
+        cursor.execute("SELECT id, telegram_id, end_time, message_id FROM purchases WHERE status='active'")
+        for purchase_id, tg_id, end_time_str, message_id in cursor.fetchall():
+            end_time = datetime.fromisoformat(end_time_str)
+            if now >= end_time:
+                try:
+                    await bot.unpin_chat_message(CHAT_ID, message_id)
+                    await bot.send_message(tg_id, "⏰ Ваш закреп завершён.")
+                except: pass
+                cursor.execute("UPDATE purchases SET status='finished' WHERE id=?", (purchase_id,))
+                conn.commit()
+
         await asyncio.sleep(30)
 
 # ================= HANDLERS =================
@@ -423,3 +537,4 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
