@@ -204,9 +204,16 @@ def add_purchase_reserve(telegram_id: int, post_text: str, start_time: datetime,
     cursor.execute("""
         INSERT INTO purchases(telegram_id, post_text, start_time, end_time, status)
         VALUES(?,?,?,?,?)
-    """, (telegram_id, post_text, start_time.isoformat(), end_time.isoformat(), "waiting_admin"))
+    """, (
+        telegram_id,
+        post_text,
+        start_time.isoformat(),
+        end_time.isoformat(),
+        "waiting_payment"   # ← сразу правильный статус
+    ))
     conn.commit()
     return cursor.lastrowid
+
 
 async def activate_purchase(purchase_id: int):
     cursor.execute("SELECT post_text,start_time,end_time FROM purchases WHERE id=?", (purchase_id,))
@@ -336,17 +343,26 @@ async def receive_post(message: types.Message, state: FSMContext):
 async def user_paid(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[2])
 
-    cursor.execute("UPDATE purchases SET status='waiting_admin' WHERE id=?", (purchase_id,))
-    conn.commit()
-
     cursor.execute("SELECT telegram_id FROM purchases WHERE id=?", (purchase_id,))
-    user_id = cursor.fetchone()[0]
+    row = cursor.fetchone()
+
+    if not row:
+        await callback.answer("❌ Заказ не найден", show_alert=True)
+        return
+
+    user_id = row[0]
+
+    cursor.execute(
+        "UPDATE purchases SET status='waiting_admin' WHERE id=?",
+        (purchase_id,)
+    )
+    conn.commit()
 
     for admin_id in ADMIN_IDS:
         await bot.send_message(
             admin_id,
             f"💳 Пользователь {user_id} оплатил закреп.\n"
-            f"Проверьте свою карту карту Т-Банка.",
+            f"Проверьте карту Т-Банка.",
             reply_markup=admin_confirmation_keyboard(purchase_id)
         )
 
@@ -488,6 +504,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
