@@ -128,8 +128,14 @@ def admin_confirmation_keyboard(purchase_id: int):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{purchase_id}"),
-                InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{purchase_id}")
+                InlineKeyboardButton(
+                    text="✅ Подтвердить",
+                    callback_data=f"confirm_{purchase_id}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отменить",
+                    callback_data=f"cancel_{purchase_id}"
+                )
             ]
         ]
     )
@@ -482,6 +488,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
