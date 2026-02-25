@@ -299,23 +299,33 @@ async def receive_post(message: types.Message, state: FSMContext):
     start_date = datetime.fromisoformat(data["start_date"])
     end_date = start_date + timedelta(days=days)
     post_text = message.text
+
+    # создаём резерв
     purchase_id = add_purchase_reserve(
-    message.from_user.id,
-    post_text,
-    start_date,
-    end_date
-)
+        message.from_user.id,
+        post_text,
+        start_date,
+        end_date
+    )
 
-cursor.execute("UPDATE purchases SET status='waiting_payment' WHERE id=?", (purchase_id,))
-conn.commit()
+    # меняем статус на ожидание оплаты
+    cursor.execute(
+        "UPDATE purchases SET status='waiting_payment' WHERE id=?",
+        (purchase_id,)
+    )
+    conn.commit()
 
-await message.answer(
-    f"💳 Резерв создан!\n\n"
-    f"Сумма: {days * get_price()} руб\n"
-    f"Оплатите переводом на карту 5536914058801691 Т-Банк.\n"
-    f"После оплаты нажмите кнопку ниже.",
-    reply_markup=user_payment_keyboard(purchase_id)
-)
+    await message.answer(
+        f"💳 Резерв создан!\n\n"
+        f"Сумма: {days * get_price()} руб\n"
+        f"Оплатите переводом на карту 5536914058801691 Т-Банк.\n"
+        f"После оплаты нажмите кнопку ниже.",
+        reply_markup=user_payment_keyboard(purchase_id)
+    )
+
+    await state.clear()
+
+
 @dp.callback_query(F.data.startswith("user_paid_"))
 async def user_paid(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[2])
@@ -472,5 +482,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
