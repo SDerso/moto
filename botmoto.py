@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 import os
-
+from aiogram.filters import CommandStart
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -759,6 +759,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
