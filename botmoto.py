@@ -308,6 +308,7 @@ async def choose_date(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# ================= HANDLER: receive_post =================
 @dp.message(Order.writing_post)
 async def receive_post(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -315,21 +316,28 @@ async def receive_post(message: types.Message, state: FSMContext):
     start_date = datetime.fromisoformat(data["start_date"])
     end_date = start_date + timedelta(days=days)
 
+    # Текст поста
     post_text = message.caption if message.caption else message.text
+
     media_type = "text"
-    media_files = []
+    media_ids = None
 
-    # Проверяем, альбом (media_group)
-    if message.media_group_id:
-        media_type = "photo_group"
-        for m in message.media_group:  # все фото в альбоме
-            if m.photo:
-                media_files.append(m.photo[-1].file_id)
-    elif message.photo:
+    # Проверяем фото/альбом
+    if message.photo:  # одно фото
         media_type = "photo"
-        media_files.append(message.photo[-1].file_id)
+        media_ids = message.photo[-1].file_id
+    elif message.media_group_id:  # часть альбома
+        # Сохраняем медиа группой
+        cursor.execute("SELECT media, media_type FROM purchases WHERE telegram_id=? AND status='draft' ORDER BY id DESC LIMIT 1",
+                       (message.from_user.id,))
+        last = cursor.fetchone()
+        if last and last[1] == "photo_group":
+            media_ids = last[0] + "," + message.photo[-1].file_id
+        else:
+            media_type = "photo_group"
+            media_ids = message.photo[-1].file_id
 
-    # Добавляем запись в БД
+    # Сохраняем в базу
     purchase_id = add_purchase_reserve(
         message.from_user.id,
         post_text,
@@ -337,13 +345,11 @@ async def receive_post(message: types.Message, state: FSMContext):
         end_date
     )
 
-    # Сохраняем медиа
-    media_str = ",".join(media_files) if media_files else None
     cursor.execute("""
         UPDATE purchases
         SET media=?, media_type=?
         WHERE id=?
-    """, (media_str, media_type, purchase_id))
+    """, (media_ids, media_type, purchase_id))
     conn.commit()
 
     await message.answer(
@@ -360,8 +366,77 @@ async def receive_post(message: types.Message, state: FSMContext):
 
     await state.clear()
 
-    await state.clear()
+@dp.message(F.content_type.in_({"text", "photo"}))
+async def receive_post(message: types.Message, state: FSMContext):
+    data = await state.get_data()
 
+    # Проверяем, что пользователь выбрал дни и дату
+    if "days" not in data or "start_date" not in data:
+        await message.answer("❌ Сначала выберите количество дней и дату")
+        return
+
+    days = data["days"]
+    start_date = datetime.fromisoformat(data["start_date"])
+    end_date = start_date + timedelta(days=days)
+
+    # Получаем текст поста
+    post_text = message.caption if message.caption else (message.text if message.text else "")
+
+    # Работа с фото
+    media_group_id = message.media_group_id
+    media_list = data.get("media_list", [])
+
+    if message.photo:
+        media_list.append(message.photo[-1].file_id)
+        await state.update_data(media_list=media_list)
+        await state.update_data(post_text=post_text)
+
+        if media_group_id:
+            # Если фото в альбоме, ждем остальные фото
+            return
+        else:
+            # Одно фото — создаем заказ
+            media_type = "photo"
+            media_to_save = media_list[0]
+    else:
+        # Только текст
+        media_type = "text"
+        media_to_save = None
+
+    # Создаем резерв в БД
+    purchase_id = add_purchase_reserve(
+        message.from_user.id,
+        post_text,
+        start_date,
+        end_date
+    )
+
+    # Сохраняем медиа
+    if media_type in ["photo", "photo_group"]:
+        media_to_save_str = ",".join(media_list) if media_type == "photo_group" else media_to_save
+        cursor.execute("""
+            UPDATE purchases
+            SET media=?, media_type=?
+            WHERE id=?
+        """, (media_to_save_str, media_type, purchase_id))
+        conn.commit()
+
+    # Кнопки для оплаты
+    await message.answer(
+        f"💳 Резерв создан!\n\n"
+        f"📅 Срок закрепа: {days} {'день' if days == 1 else 'дня' if days < 5 else 'дней'}\n"
+        f"💰 Сумма к оплате: {days * get_price()} руб\n\n"
+        f"📌 Инструкция по оплате:\n"
+        f"1️⃣ Переведите сумму на карту Т-Банк: 5536914058801691\n"
+        f"2️⃣ В комментарии к платежу укажите дату закрепа и ваш @username\n"
+        f"3️⃣ После оплаты нажмите кнопку «✅ Я оплатил» ниже\n\n"
+        f"⏳ После подтверждения админом ваш пост будет закреплен.",
+        parse_mode="HTML",
+        reply_markup=user_payment_keyboard(purchase_id)
+    )
+
+    # Очистка state
+    await state.clear()
 
 from aiogram.types import InputMediaPhoto
 
@@ -445,14 +520,13 @@ async def user_paid(callback: types.CallbackQuery):
     await callback.answer()
 
 # ================= ADMIN =================
+# ================= HANDLER: confirm_payment =================
 @dp.callback_query(F.data.startswith("confirm_"))
 async def confirm_payment(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[1])
 
-    # Получаем информацию о заказе
     cursor.execute("""
-        SELECT telegram_id, post_text, media, media_type,
-               start_time, end_time, status
+        SELECT telegram_id, post_text, media, media_type, start_time, end_time, status
         FROM purchases
         WHERE id=?
     """, (purchase_id,))
@@ -468,44 +542,29 @@ async def confirm_payment(callback: types.CallbackQuery):
         await callback.answer("❌ Этот заказ уже обработан", show_alert=True)
         return
 
-    # 🔴 Снимаем предыдущий активный закреп
-    cursor.execute("SELECT id, message_id FROM purchases WHERE status='active'")
-    active = cursor.fetchone()
-    if active:
-        old_id, old_message_id = active
-        try:
-            await bot.unpin_chat_message(CHAT_ID, old_message_id)
-        except:
-            pass
-        cursor.execute("UPDATE purchases SET status='finished' WHERE id=?", (old_id,))
-        conn.commit()
-
     # вычисляем дни
     reserved_start_dt = datetime.fromisoformat(reserved_start)
     reserved_end_dt = datetime.fromisoformat(reserved_end)
     days = (reserved_end_dt - reserved_start_dt).days
 
-    # 🚀 стартуем СЕЙЧАС
+    # старт закрепа прямо сейчас
     real_start = datetime.now()
     real_end = real_start + timedelta(days=days)
 
-    # Отправка поста в зависимости от типа
-    if media_type == "photo_group" and media_str:
-        # публикация альбома
-        media_ids = media_str.split(",")
-        media_group = [InputMediaPhoto(media=m, caption=post_text if i == 0 else "") 
-                       for i, m in enumerate(media_ids)]
-        msgs = await bot.send_media_group(CHAT_ID, media_group)
-        msg_id = msgs[0].message_id  # закрепим первый пост в группе
-        await bot.pin_chat_message(CHAT_ID, msg_id)
-    elif media_type == "photo" and media_str:
-        msg = await bot.send_photo(CHAT_ID, photo=media_str, caption=post_text)
-        msg_id = msg.message_id
-        await bot.pin_chat_message(CHAT_ID, msg_id)
-    else:
+    # публикация поста
+    if media_type == "text":
         msg = await bot.send_message(CHAT_ID, post_text)
-        msg_id = msg.message_id
-        await bot.pin_chat_message(CHAT_ID, msg_id)
+    elif media_type == "photo":
+        msg = await bot.send_photo(CHAT_ID, media_str, caption=post_text)
+    elif media_type == "photo_group":
+        media_ids = media_str.split(",")
+        media_group = [types.InputMediaPhoto(media=mid) for mid in media_ids]
+        media_group[0].caption = post_text
+        sent_messages = await bot.send_media_group(CHAT_ID, media_group)
+        msg = sent_messages[0]
+
+    # закрепляем первое сообщение
+    await bot.pin_chat_message(CHAT_ID, msg.message_id)
 
     # обновляем БД
     cursor.execute("""
@@ -515,13 +574,12 @@ async def confirm_payment(callback: types.CallbackQuery):
             end_time=?,
             message_id=?
         WHERE id=?
-    """, (real_start.isoformat(), real_end.isoformat(), msg_id, purchase_id))
+    """, (real_start.isoformat(), real_end.isoformat(), msg.message_id, purchase_id))
     conn.commit()
 
     await bot.send_message(
         user_id,
-        f"✅ Оплата подтверждена!\n"
-        f"Закреп активирован на {days} дн. ({days*24} часов)"
+        f"✅ Оплата подтверждена!\nЗакреп активирован на {days} дн. ({days*24} часов)"
     )
 
     await callback.message.edit_text("✅ Оплата подтверждена. Закреп активирован.")
@@ -852,6 +910,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
