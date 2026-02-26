@@ -294,13 +294,20 @@ async def choose_days(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("date_"))
 async def choose_date(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+
+    if "days" not in data:
+        await callback.answer("❌ Сначала выберите количество дней", show_alert=True)
+        return  # не продолжаем
+
+    days = data["days"]
     date_str = callback.data.split("_")[1]
     start_date = datetime.fromisoformat(date_str)
-    data = await state.get_data()
-    days = data["days"]
+
     if not is_slot_free(start_date, days):
         await callback.answer("❌ Эти даты заняты", show_alert=True)
         return
+
     await state.update_data(start_date=start_date.isoformat())
     await callback.message.answer("✍ Отправьте текст поста для закрепа")
     await state.set_state(Order.writing_post)
@@ -793,6 +800,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
