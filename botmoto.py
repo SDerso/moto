@@ -235,18 +235,23 @@ async def scheduler():
 
 # ================= HANDLERS =================
 @dp.message(CommandStart())
-async def start(message: types.Message):
-    telegram_id = message.from_user.id
-    username = message.from_user.username or "Без username"
-
-    cursor.execute("""
-        INSERT OR IGNORE INTO users (telegram_id, username)
-        VALUES (?, ?)
-    """, (telegram_id, username))
-
+async def start(message: types.Message, state: FSMContext):
+    # Добавляем пользователя в базу
+    cursor.execute(
+        "INSERT OR IGNORE INTO users(telegram_id, username) VALUES(?,?)",
+        (message.from_user.id, message.from_user.username)
+    )
     conn.commit()
 
-    await message.answer("🏍 Добро пожаловать в Мото-Любители! Тут ты можешь купить закреп на выбранную тобой дату.")
+    # Отправляем приветствие и главное меню
+    await message.answer(
+        "🏍 Добро пожаловать в систему закрепов!",
+        reply_markup=main_menu()  # убедись, что main_menu() возвращает ReplyKeyboardMarkup
+    )
+
+    # Очистка состояния на всякий случай
+    await state.clear()
+
 
 @dp.message(F.text == "📌 Купить закреп")
 async def buy(message: types.Message, state: FSMContext):
@@ -759,6 +764,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
