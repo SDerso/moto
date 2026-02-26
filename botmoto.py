@@ -178,37 +178,31 @@ def add_purchase_reserve(telegram_id: int, post_text: str, start_time: datetime,
     conn.commit()
     return cursor.lastrowid
 
-async def activate_purchase(purchase_id: int):
-    cursor.execute("SELECT post_text,start_time,end_time FROM purchases WHERE id=?", (purchase_id,))
-    row = cursor.fetchone()
-    if not row: return
-    post_text, start_time_str, end_time_str = row
-    start_time = datetime.fromisoformat(start_time_str)
-    end_time = datetime.fromisoformat(end_time_str)
-    if datetime.now() >= start_time:
-        msg = await bot.send_message(CHAT_ID, post_text)
-        await bot.pin_chat_message(CHAT_ID, msg.message_id)
-        cursor.execute("UPDATE purchases SET status='active', message_id=? WHERE id=?", (msg.message_id, purchase_id))
-        conn.commit()
-
 async def scheduler():
     while True:
         now = datetime.now()
-        cursor.execute("SELECT id, start_time FROM purchases WHERE status='waiting_admin'")
-        for purchase_id, start_time_str in cursor.fetchall():
-            start_time = datetime.fromisoformat(start_time_str)
-            if now >= start_time:
-                await activate_purchase(purchase_id)
 
-        cursor.execute("SELECT id, telegram_id, end_time, message_id FROM purchases WHERE status='active'")
+        cursor.execute("""
+            SELECT id, telegram_id, end_time, message_id
+            FROM purchases
+            WHERE status='active'
+        """)
+
         for purchase_id, tg_id, end_time_str, message_id in cursor.fetchall():
             end_time = datetime.fromisoformat(end_time_str)
+
             if now >= end_time:
                 try:
                     await bot.unpin_chat_message(CHAT_ID, message_id)
                     await bot.send_message(tg_id, "⏰ Ваш закреп завершён.")
-                except: pass
-                cursor.execute("UPDATE purchases SET status='finished' WHERE id=?", (purchase_id,))
+                except:
+                    pass
+
+                cursor.execute("""
+                    UPDATE purchases
+                    SET status='finished'
+                    WHERE id=?
+                """, (purchase_id,))
                 conn.commit()
 
         await asyncio.sleep(30)
@@ -471,15 +465,59 @@ async def admin_cancelled(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=admin_menu_keyboard()) 
     await callback.answer() 
 
-@dp.callback_query(F.data.startswith("confirm_")) 
-async def confirm_payment(callback: types.CallbackQuery): 
-    purchase_id = int(callback.data.split("_")[1]) 
-    await activate_purchase(purchase_id) 
-    cursor.execute("SELECT telegram_id FROM purchases WHERE id=?", (purchase_id,)) 
-    tg_id = cursor.fetchone()[0] 
-    await bot.send_message(tg_id, "✅ Ваша оплата подтверждена. Закреп активирован.") 
-    await callback.message.edit_text("✅ Оплата подтверждена. Закреп активирован") 
-    await callback.answer() 
+@dp.callback_query(F.data.startswith("confirm_"))
+async def confirm_payment(callback: types.CallbackQuery):
+    purchase_id = int(callback.data.split("_")[1])
+
+    cursor.execute("""
+        SELECT telegram_id, post_text, start_time, end_time, status
+        FROM purchases
+        WHERE id=?
+    """, (purchase_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        await callback.answer("❌ Заказ не найден", show_alert=True)
+        return
+
+    user_id, post_text, reserved_start, reserved_end, status = row
+
+    if status != "waiting_admin":
+        await callback.answer("❌ Этот заказ уже обработан", show_alert=True)
+        return
+
+    # считаем сколько дней было выбрано
+    reserved_start_dt = datetime.fromisoformat(reserved_start)
+    reserved_end_dt = datetime.fromisoformat(reserved_end)
+    days = (reserved_end_dt - reserved_start_dt).days
+
+    # 🚀 стартуем СЕЙЧАС
+    real_start = datetime.now()
+    real_end = real_start + timedelta(days=days)
+
+    # публикуем пост
+    msg = await bot.send_message(CHAT_ID, post_text)
+    await bot.pin_chat_message(CHAT_ID, msg.message_id)
+
+    # обновляем БД
+    cursor.execute("""
+        UPDATE purchases
+        SET status='active',
+            start_time=?,
+            end_time=?,
+            message_id=?
+        WHERE id=?
+    """, (real_start.isoformat(), real_end.isoformat(), msg.message_id, purchase_id))
+    conn.commit()
+
+    await bot.send_message(
+        user_id,
+        f"✅ Оплата подтверждена!\n"
+        f"Закреп активирован на {days} дн. ({days*24} часов)"
+    )
+
+    await callback.message.edit_text("✅ Оплата подтверждена. Закреп активирован.")
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("cancel_")) 
 async def cancel_payment(callback: types.CallbackQuery): 
@@ -537,4 +575,5 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
