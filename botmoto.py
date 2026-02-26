@@ -245,7 +245,7 @@ async def start(message: types.Message, state: FSMContext):
 
     # Отправляем приветствие и главное меню
     await message.answer(
-        "🏍 Добро пожаловать в систему закрепов!",
+        "🏍 Добро пожаловать в систему закрепов!\nЧерез этого бота можно закрепить свой пост на время.\nГлавное в посте указать свой @username\nИспользуйте кнопки ниже.",
         reply_markup=main_menu()  # убедись, что main_menu() возвращает ReplyKeyboardMarkup
     )
 
@@ -764,6 +764,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
