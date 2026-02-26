@@ -87,18 +87,12 @@ class AdminStates(StatesGroup):
 # ================= KEYBOARDS =================
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-def user_payment_keyboard(purchase_id: int, card_number: str = "5536 9140 5880 1691"):
+def user_payment_keyboard(purchase_id: int):
     """
     Возвращает клавиатуру для оплаты с кнопкой копирования карты
     и кнопками "Я оплатил" и "Отказаться".
     """
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=f"💳 Копировать карту {card_number}",
-                switch_inline_query_current_chat=card_number  # при нажатии вставляется в чат
-            )
-        ],
         [
             InlineKeyboardButton(
                 text="✅ Я оплатил",
@@ -382,7 +376,7 @@ async def user_paid(callback: types.CallbackQuery):
     conn.commit()
 
     admin_text = (
-        f"💳 Оплата поступила!\n\n"
+        f"💳 Оплата поступила! Проверьте у себя в приложении Т-Банка\n\n"
         f"👤 Ник: @{username}\n"
         f"🆔 ID: {user_id}\n"
         f"📅 {start_date.date()} - {end_date.date()} ({days} дней)\n"
@@ -800,6 +794,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
