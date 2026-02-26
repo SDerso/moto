@@ -82,6 +82,7 @@ class Order(StatesGroup):
 
 class AdminStates(StatesGroup):
     waiting_new_price = State()
+    waiting_broadcast = State()
 
 # ================= KEYBOARDS =================
 def user_payment_keyboard(purchase_id: int):
@@ -98,7 +99,10 @@ def admin_menu_keyboard():
         [InlineKeyboardButton(text="🟢 Активные", callback_data="admin_active")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="❌ Отменённые", callback_data="admin_cancelled")],
-        [InlineKeyboardButton(text="💰 Изменить цену", callback_data="admin_price")]
+        [InlineKeyboardButton(text="👥 Все пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="💰 Изменить цену", callback_data="admin_price")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_menu")]
     ])
 
 def main_menu():
@@ -230,12 +234,19 @@ async def scheduler():
         await asyncio.sleep(20)
 
 # ================= HANDLERS =================
-@dp.message(F.text == "/start")
-async def start(message: types.Message, state: FSMContext):
-    cursor.execute("INSERT OR IGNORE INTO users VALUES(?,?)", (message.from_user.id, message.from_user.username))
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    telegram_id = message.from_user.id
+    username = message.from_user.username or "Без username"
+
+    cursor.execute("""
+        INSERT OR IGNORE INTO users (telegram_id, username)
+        VALUES (?, ?)
+    """, (telegram_id, username))
+
     conn.commit()
-    await message.answer("🏍 Добро пожаловать в систему закрепов!", reply_markup=main_menu())
-    await state.clear()
+
+    await message.answer("🏍 Добро пожаловать в Мото-Любители! Тут ты можешь купить закреп на выбранную тобой дату.")
 
 @dp.message(F.text == "📌 Купить закреп")
 async def buy(message: types.Message, state: FSMContext):
@@ -421,6 +432,64 @@ async def confirm_payment(callback: types.CallbackQuery):
     )
 
     await callback.message.edit_text("✅ Оплата подтверждена.")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+
+    await callback.message.edit_text("✍ Введите текст для рассылки:")
+    await state.set_state(AdminStates.waiting_broadcast)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_broadcast)
+async def process_broadcast(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    text = message.text
+
+    cursor.execute("SELECT telegram_id FROM users")
+    users = cursor.fetchall()
+
+    sent = 0
+    failed = 0
+
+    for user in users:
+        try:
+            await bot.send_message(user[0], text)
+            sent += 1
+        except:
+            failed += 1
+
+    await message.answer(
+        f"📢 Рассылка завершена\n\n"
+        f"✅ Отправлено: {sent}\n"
+        f"❌ Ошибок: {failed}"
+    )
+
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_users")
+async def admin_users(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+
+    cursor.execute("SELECT telegram_id, username FROM users")
+    users = cursor.fetchall()
+
+    if not users:
+        await callback.message.edit_text("Пользователей нет.")
+        await callback.answer()
+        return
+
+    text = "👥 Все пользователи:\n\n"
+
+    for user in users:
+        text += f"ID: {user[0]} | @{user[1]}\n"
+
+    await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("cancel_"))
@@ -690,6 +759,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
