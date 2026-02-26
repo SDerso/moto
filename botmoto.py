@@ -85,14 +85,31 @@ class AdminStates(StatesGroup):
     waiting_broadcast = State()
 
 # ================= KEYBOARDS =================
-def user_payment_keyboard(purchase_id: int):
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+def user_payment_keyboard(purchase_id: int, card_number: str = "5536 9140 5880 1691"):
+    """
+    Возвращает клавиатуру для оплаты с кнопкой копирования карты
+    и кнопками "Я оплатил" и "Отказаться".
+    """
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💳 Я оплатил", callback_data=f"user_paid_{purchase_id}"),
-            InlineKeyboardButton(text="❌ Отказаться", callback_data=f"user_cancel_{purchase_id}")
+            InlineKeyboardButton(
+                text=f"💳 Копировать карту {card_number}",
+                switch_inline_query_current_chat=card_number  # при нажатии вставляется в чат
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="✅ Я оплатил",
+                callback_data=f"user_paid_{purchase_id}"
+            ),
+            InlineKeyboardButton(
+                text="❌ Отказаться",
+                callback_data=f"user_cancel_{purchase_id}"
+            )
         ]
     ])
-
 def admin_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏳ Ожидают подтверждения", callback_data="admin_waiting")],
@@ -319,6 +336,7 @@ async def receive_post(message: types.Message, state: FSMContext):
     """, (media, media_type, purchase_id))
     conn.commit()
 
+    card_number = "5536 9140 5880 1691"
     await message.answer(
     f"💳 Резерв создан!\n\n"
     f"📅 Срок закрепа: {days} {'день' if days == 1 else 'дня' if days < 5 else 'дней'}\n"
@@ -328,7 +346,7 @@ async def receive_post(message: types.Message, state: FSMContext):
     f"2️⃣ В комментарии к платежу укажите дату закрепа и ваш @username\n"
     f"3️⃣ После оплаты нажмите кнопку «💳 Я оплатил» ниже, чтобы уведомить администратора\n\n"
     f"⏳ После подтверждения админом ваш пост будет закреплен на выбранное время.",
-    reply_markup=user_payment_keyboard(purchase_id)
+    reply_markup=payment_keyboard(card_number, purchase_id)
 )
 
     await state.clear()
@@ -773,6 +791,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
