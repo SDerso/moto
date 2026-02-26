@@ -346,7 +346,7 @@ async def receive_post(message: types.Message, state: FSMContext):
     f"2️⃣ В комментарии к платежу укажите дату закрепа и ваш @username\n"
     f"3️⃣ После оплаты нажмите кнопку «💳 Я оплатил» ниже, чтобы уведомить администратора\n\n"
     f"⏳ После подтверждения админом ваш пост будет закреплен на выбранное время.",
-    reply_markup=payment_keyboard(card_number, purchase_id)
+    reply_markup=user_payment_keyboard(card_number, purchase_id)
 )
 
     await state.clear()
@@ -791,6 +791,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
