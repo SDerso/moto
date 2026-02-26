@@ -205,7 +205,7 @@ async def scheduler():
                 """, (purchase_id,))
                 conn.commit()
 
-        await asyncio.sleep(30)
+        await asyncio.sleep(20)
 
 # ================= HANDLERS =================
 @dp.message(F.text == "/start")
@@ -245,20 +245,45 @@ async def choose_date(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(Order.writing_post)
     await callback.answer()
 
+
 @dp.message(Order.writing_post)
 async def receive_post(message: types.Message, state: FSMContext):
     data = await state.get_data()
     days = data["days"]
     start_date = datetime.fromisoformat(data["start_date"])
     end_date = start_date + timedelta(days=days)
-    post_text = message.text
 
-    purchase_id = add_purchase_reserve(message.from_user.id, post_text, start_date, end_date)
+    post_text = message.caption if message.caption else message.text
+    media = None
+    media_type = "text"
+
+    # если фото
+    if message.photo:
+        media = message.photo[-1].file_id
+        media_type = "photo"
+
+    purchase_id = add_purchase_reserve(
+        message.from_user.id,
+        post_text,
+        start_date,
+        end_date
+    )
+
+    # сохраняем медиа отдельно
+    cursor.execute("""
+        UPDATE purchases
+        SET media=?, media_type=?
+        WHERE id=?
+    """, (media, media_type, purchase_id))
+    conn.commit()
 
     await message.answer(
-        f"💳 Резерв создан!\nСумма: {days*get_price()} руб\nОплатите переводом на карту Т-Банк 5536914058801691 и нажмите кнопку ниже.",
+        f"💳 Резерв создан!\n"
+        f"Сумма: {days * get_price()} руб\n"
+        f"Оплатите переводом на карту Т-Банк 5536914058801691 и нажмите кнопку ниже.",
         reply_markup=user_payment_keyboard(purchase_id)
     )
+
     await state.clear()
 
 @dp.callback_query(F.data.startswith("user_paid_"))
@@ -301,11 +326,79 @@ async def user_paid(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("confirm_"))
 async def confirm_payment(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[1])
-    await activate_purchase(purchase_id)
-    cursor.execute("SELECT telegram_id FROM purchases WHERE id=?", (purchase_id,))
-    user_id = cursor.fetchone()[0]
-    await bot.send_message(user_id, "✅ Ваша оплата подтверждена. Закреп активирован.")
-    await callback.message.edit_text("✅ Оплата подтверждена. Закреп активирован")
+
+    cursor.execute("""
+        SELECT telegram_id, post_text, media, media_type,
+               start_time, end_time, status
+        FROM purchases
+        WHERE id=?
+    """, (purchase_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        await callback.answer("❌ Заказ не найден", show_alert=True)
+        return
+
+    user_id, post_text, media, media_type, reserved_start, reserved_end, status = row
+
+    if status != "waiting_admin":
+        await callback.answer("❌ Уже обработано", show_alert=True)
+        return
+
+    # 🔴 СНИМАЕМ предыдущий активный закреп если есть
+    cursor.execute("""
+        SELECT id, message_id
+        FROM purchases
+        WHERE status='active'
+    """)
+    active = cursor.fetchone()
+
+    if active:
+        old_id, old_message_id = active
+        try:
+            await bot.unpin_chat_message(CHAT_ID, old_message_id)
+        except:
+            pass
+
+        cursor.execute("UPDATE purchases SET status='finished' WHERE id=?", (old_id,))
+        conn.commit()
+
+    # вычисляем дни
+    reserved_start_dt = datetime.fromisoformat(reserved_start)
+    reserved_end_dt = datetime.fromisoformat(reserved_end)
+    days = (reserved_end_dt - reserved_start_dt).days
+
+    real_start = datetime.now()
+    real_end = real_start + timedelta(days=days)
+
+    # отправка поста
+    if media_type == "photo":
+        msg = await bot.send_photo(
+            CHAT_ID,
+            photo=media,
+            caption=post_text
+        )
+    else:
+        msg = await bot.send_message(CHAT_ID, post_text)
+
+    await bot.pin_chat_message(CHAT_ID, msg.message_id)
+
+    cursor.execute("""
+        UPDATE purchases
+        SET status='active',
+            start_time=?,
+            end_time=?,
+            message_id=?
+        WHERE id=?
+    """, (real_start.isoformat(), real_end.isoformat(), msg.message_id, purchase_id))
+    conn.commit()
+
+    await bot.send_message(
+        user_id,
+        f"✅ Закреп активирован на {days} дн. ({days*24} часов)"
+    )
+
+    await callback.message.edit_text("✅ Оплата подтверждена.")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("cancel_"))
@@ -575,5 +668,6 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
