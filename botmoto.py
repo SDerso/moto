@@ -23,6 +23,18 @@ dp = Dispatcher(storage=MemoryStorage())
 conn = sqlite3.connect("botmoto.db")
 cursor = conn.cursor()
 
+# ====== FIX DB STRUCTURE ======
+cursor.execute("PRAGMA table_info(purchases)")
+columns = [col[1] for col in cursor.fetchall()]
+
+if "media" not in columns:
+    cursor.execute("ALTER TABLE purchases ADD COLUMN media TEXT")
+
+if "media_type" not in columns:
+    cursor.execute("ALTER TABLE purchases ADD COLUMN media_type TEXT")
+
+conn.commit()
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users(
     telegram_id INTEGER PRIMARY KEY,
@@ -668,6 +680,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
