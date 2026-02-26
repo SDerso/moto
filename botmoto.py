@@ -320,11 +320,16 @@ async def receive_post(message: types.Message, state: FSMContext):
     conn.commit()
 
     await message.answer(
-        f"💳 Резерв создан!\n"
-        f"Сумма: {days * get_price()} руб\n"
-        f"Оплатите переводом на карту Т-Банк 5536914058801691 в комментарии платежка укажите дату и свой @username\nНажмите кнопку ниже.",
-        reply_markup=user_payment_keyboard(purchase_id)
-    )
+    f"💳 Резерв создан!\n\n"
+    f"📅 Срок закрепа: {days} {'день' if days == 1 else 'дня' if days < 5 else 'дней'}\n"
+    f"💰 Сумма к оплате: {days * get_price()} руб\n\n"
+    f"📌 Инструкция по оплате:\n"
+    f"1️⃣ Переведите сумму на карту Т-Банк: `5536 9140 5880 1691`\n"
+    f"2️⃣ В комментарии к платежу укажите дату закрепа и ваш @username\n"
+    f"3️⃣ После оплаты нажмите кнопку «💳 Я оплатил» ниже, чтобы уведомить администратора\n\n"
+    f"⏳ После подтверждения админом ваш пост будет закреплен на выбранное время.",
+    reply_markup=user_payment_keyboard(purchase_id)
+)
 
     await state.clear()
 
@@ -768,6 +773,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
