@@ -362,6 +362,52 @@ async def receive_post(message: types.Message, state: FSMContext):
 
     await state.clear()
 
+
+from aiogram.types import InputMediaPhoto
+
+# Для медиа-групп (альбомов)
+@dp.message(F.media_group_id)
+async def receive_album(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    days = data["days"]
+    start_date = datetime.fromisoformat(data["start_date"])
+    end_date = start_date + timedelta(days=days)
+
+    post_text = message.caption or ""
+    media_files = [m.file_id for m in message.photo]  # aiogram собирает все фото в message.photo
+    media_type = "photo_group"
+
+    # Добавляем запись в БД
+    purchase_id = add_purchase_reserve(
+        message.from_user.id,
+        post_text,
+        start_date,
+        end_date
+    )
+
+    # Сохраняем медиа
+    media_str = ",".join(media_files)
+    cursor.execute("""
+        UPDATE purchases
+        SET media=?, media_type=?
+        WHERE id=?
+    """, (media_str, media_type, purchase_id))
+    conn.commit()
+
+    await message.answer(
+        f"💳 Резерв создан!\n"
+        f"📅 Срок закрепа: {days} {'день' if days == 1 else 'дня' if days < 5 else 'дней'}\n"
+        f"💰 Сумма к оплате: {days * get_price()} руб\n\n"
+        f"📌 Инструкция по оплате:\n"
+        f"1️⃣ Переведите сумму на карту Т-Банк: 5536914058801691\n"
+        f"2️⃣ В комментарии к платежу укажите дату закрепа и ваш @username\n"
+        f"3️⃣ После оплаты нажмите кнопку «✅ Я оплатил» ниже.\n\n"
+        f"⏳ После подтверждения админом ваш пост будет закреплен на выбранное время.",
+        reply_markup=user_payment_keyboard(purchase_id)
+    )
+
+    await state.clear()
+
 @dp.callback_query(F.data.startswith("user_paid_"))
 async def user_paid(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[2])
@@ -403,6 +449,7 @@ async def user_paid(callback: types.CallbackQuery):
 async def confirm_payment(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[1])
 
+    # Получаем информацию о заказе
     cursor.execute("""
         SELECT telegram_id, post_text, media, media_type,
                start_time, end_time, status
@@ -415,27 +462,21 @@ async def confirm_payment(callback: types.CallbackQuery):
         await callback.answer("❌ Заказ не найден", show_alert=True)
         return
 
-    user_id, post_text, media, media_type, reserved_start, reserved_end, status = row
+    user_id, post_text, media_str, media_type, reserved_start, reserved_end, status = row
 
     if status != "waiting_admin":
-        await callback.answer("❌ Уже обработано", show_alert=True)
+        await callback.answer("❌ Этот заказ уже обработан", show_alert=True)
         return
 
-    # 🔴 СНИМАЕМ предыдущий активный закреп если есть
-    cursor.execute("""
-        SELECT id, message_id
-        FROM purchases
-        WHERE status='active'
-    """)
+    # 🔴 Снимаем предыдущий активный закреп
+    cursor.execute("SELECT id, message_id FROM purchases WHERE status='active'")
     active = cursor.fetchone()
-
     if active:
         old_id, old_message_id = active
         try:
             await bot.unpin_chat_message(CHAT_ID, old_message_id)
         except:
             pass
-
         cursor.execute("UPDATE purchases SET status='finished' WHERE id=?", (old_id,))
         conn.commit()
 
@@ -444,21 +485,29 @@ async def confirm_payment(callback: types.CallbackQuery):
     reserved_end_dt = datetime.fromisoformat(reserved_end)
     days = (reserved_end_dt - reserved_start_dt).days
 
+    # 🚀 стартуем СЕЙЧАС
     real_start = datetime.now()
     real_end = real_start + timedelta(days=days)
 
-    # отправка поста
-    if media_type == "photo":
-        msg = await bot.send_photo(
-            CHAT_ID,
-            photo=media,
-            caption=post_text
-        )
+    # Отправка поста в зависимости от типа
+    if media_type == "photo_group" and media_str:
+        # публикация альбома
+        media_ids = media_str.split(",")
+        media_group = [InputMediaPhoto(media=m, caption=post_text if i == 0 else "") 
+                       for i, m in enumerate(media_ids)]
+        msgs = await bot.send_media_group(CHAT_ID, media_group)
+        msg_id = msgs[0].message_id  # закрепим первый пост в группе
+        await bot.pin_chat_message(CHAT_ID, msg_id)
+    elif media_type == "photo" and media_str:
+        msg = await bot.send_photo(CHAT_ID, photo=media_str, caption=post_text)
+        msg_id = msg.message_id
+        await bot.pin_chat_message(CHAT_ID, msg_id)
     else:
         msg = await bot.send_message(CHAT_ID, post_text)
+        msg_id = msg.message_id
+        await bot.pin_chat_message(CHAT_ID, msg_id)
 
-    await bot.pin_chat_message(CHAT_ID, msg.message_id)
-
+    # обновляем БД
     cursor.execute("""
         UPDATE purchases
         SET status='active',
@@ -466,15 +515,16 @@ async def confirm_payment(callback: types.CallbackQuery):
             end_time=?,
             message_id=?
         WHERE id=?
-    """, (real_start.isoformat(), real_end.isoformat(), msg.message_id, purchase_id))
+    """, (real_start.isoformat(), real_end.isoformat(), msg_id, purchase_id))
     conn.commit()
 
     await bot.send_message(
         user_id,
-        f"✅ Закреп активирован на {days} дн. ({days*24} часов)"
+        f"✅ Оплата подтверждена!\n"
+        f"Закреп активирован на {days} дн. ({days*24} часов)"
     )
 
-    await callback.message.edit_text("✅ Оплата подтверждена.")
+    await callback.message.edit_text("✅ Оплата подтверждена. Закреп активирован.")
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_broadcast")
@@ -802,6 +852,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
