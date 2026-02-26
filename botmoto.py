@@ -316,14 +316,20 @@ async def receive_post(message: types.Message, state: FSMContext):
     end_date = start_date + timedelta(days=days)
 
     post_text = message.caption if message.caption else message.text
-    media = None
     media_type = "text"
+    media_files = []
 
-    # если фото
-    if message.photo:
-        media = message.photo[-1].file_id
+    # Проверяем, альбом (media_group)
+    if message.media_group_id:
+        media_type = "photo_group"
+        for m in message.media_group:  # все фото в альбоме
+            if m.photo:
+                media_files.append(m.photo[-1].file_id)
+    elif message.photo:
         media_type = "photo"
+        media_files.append(message.photo[-1].file_id)
 
+    # Добавляем запись в БД
     purchase_id = add_purchase_reserve(
         message.from_user.id,
         post_text,
@@ -331,25 +337,28 @@ async def receive_post(message: types.Message, state: FSMContext):
         end_date
     )
 
-    # сохраняем медиа отдельно
+    # Сохраняем медиа
+    media_str = ",".join(media_files) if media_files else None
     cursor.execute("""
         UPDATE purchases
         SET media=?, media_type=?
         WHERE id=?
-    """, (media, media_type, purchase_id))
+    """, (media_str, media_type, purchase_id))
     conn.commit()
 
     await message.answer(
-    f"💳 Резерв создан!\n\n"
-    f"📅 Срок закрепа: {days} {'день' if days == 1 else 'дня' if days < 5 else 'дней'}\n"
-    f"💰 Сумма к оплате: {days * get_price()} руб\n\n"
-    f"📌 Инструкция по оплате:\n"
-    f"1️⃣ Переведите сумму на карту Т-Банк: 5536914058801691\n"
-    f"2️⃣ В комментарии к платежу укажите дату закрепа и ваш @username\n"
-    f"3️⃣ После оплаты нажмите кнопку «💳 Я оплатил» ниже, чтобы уведомить администратора\n\n"
-    f"⏳ После подтверждения админом ваш пост будет закреплен на выбранное время.",
-    reply_markup=user_payment_keyboard(purchase_id)
-)
+        f"💳 Резерв создан!\n\n"
+        f"📅 Срок закрепа: {days} {'день' if days == 1 else 'дня' if days < 5 else 'дней'}\n"
+        f"💰 Сумма к оплате: {days * get_price()} руб\n\n"
+        f"📌 Инструкция по оплате:\n"
+        f"1️⃣ Переведите сумму на карту Т-Банк: 5536914058801691\n"
+        f"2️⃣ В комментарии к платежу укажите дату закрепа и ваш @username\n"
+        f"3️⃣ После оплаты нажмите кнопку «✅ Я оплатил» ниже, чтобы уведомить администратора\n\n"
+        f"⏳ После подтверждения админом ваш пост будет закреплен на выбранное время.",
+        reply_markup=user_payment_keyboard(purchase_id)
+    )
+
+    await state.clear()
 
     await state.clear()
 
@@ -793,6 +802,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
