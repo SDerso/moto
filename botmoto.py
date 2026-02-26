@@ -23,17 +23,7 @@ dp = Dispatcher(storage=MemoryStorage())
 conn = sqlite3.connect("botmoto.db")
 cursor = conn.cursor()
 
-# ====== FIX DB STRUCTURE ======
-cursor.execute("PRAGMA table_info(purchases)")
-columns = [col[1] for col in cursor.fetchall()]
-
-if "media" not in columns:
-    cursor.execute("ALTER TABLE purchases ADD COLUMN media TEXT")
-
-if "media_type" not in columns:
-    cursor.execute("ALTER TABLE purchases ADD COLUMN media_type TEXT")
-
-conn.commit()
+# ====== CREATE TABLES ======
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users(
@@ -47,6 +37,8 @@ CREATE TABLE IF NOT EXISTS purchases(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER,
     post_text TEXT,
+    media TEXT,
+    media_type TEXT,
     start_time TEXT,
     end_time TEXT,
     status TEXT,
@@ -61,7 +53,25 @@ CREATE TABLE IF NOT EXISTS settings(
     price_per_day INTEGER
 )
 """)
-cursor.execute("INSERT OR IGNORE INTO settings(id, price_per_day) VALUES(1,?)", (PRICE_PER_DAY,))
+
+cursor.execute(
+    "INSERT OR IGNORE INTO settings(id, price_per_day) VALUES(1,?)",
+    (PRICE_PER_DAY,)
+)
+
+conn.commit()
+
+# ====== SAFE STRUCTURE UPDATE (если база старая) ======
+
+cursor.execute("PRAGMA table_info(purchases)")
+columns = [col[1] for col in cursor.fetchall()]
+
+if "media" not in columns:
+    cursor.execute("ALTER TABLE purchases ADD COLUMN media TEXT")
+
+if "media_type" not in columns:
+    cursor.execute("ALTER TABLE purchases ADD COLUMN media_type TEXT")
+
 conn.commit()
 
 # ================= FSM =================
@@ -680,6 +690,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
