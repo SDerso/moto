@@ -318,7 +318,7 @@ async def receive_post(message: types.Message, state: FSMContext):
     await message.answer(
         f"💳 Резерв создан!\n"
         f"Сумма: {days * get_price()} руб\n"
-        f"Оплатите переводом на карту Т-Банк 5536914058801691 и нажмите кнопку ниже.",
+        f"Оплатите переводом на карту Т-Банк 5536914058801691 в комментарии платежка укажите дату и свой @username\nНажмите кнопку ниже.",
         reply_markup=user_payment_keyboard(purchase_id)
     )
 
@@ -764,6 +764,7 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
 
 
 
