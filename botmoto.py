@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 import os
+import contextlib
 from aiogram.filters import CommandStart
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -20,8 +21,24 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # ================= DATABASE =================
-conn = sqlite3.connect("botmoto.db")
-cursor = conn.cursor()
+# ================= DATABASE CONTEXT MANAGER =================
+@contextlib.contextmanager
+def db_cursor():
+    """
+    Контекстный менеджер для работы с базой данных.
+    Автоматически открывает и закрывает соединение.
+    """
+    conn = sqlite3.connect("botmoto.db")
+    conn.row_factory = sqlite3.Row  # Позволяет обращаться к колонкам по имени
+    cursor = conn.cursor()
+    try:
+        yield cursor  # Здесь код внутри 'with' получает cursor
+        conn.commit()  # Сохраняем изменения
+    except Exception as e:
+        conn.rollback()  # Откатываем при ошибке
+        raise e
+    finally:
+        conn.close()  # Всегда закрываем соединение
 
 # ====== CREATE TABLES ======
 cursor.execute("""
@@ -118,6 +135,56 @@ def main_menu():
         resize_keyboard=True
     )
 
+def init_database():
+    """Создает таблицы и обновляет структуру БД при запуске"""
+    with db_cursor() as cursor:
+        # ====== CREATE TABLES ======
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users(
+            telegram_id INTEGER PRIMARY KEY,
+            username TEXT
+        )
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS purchases(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER,
+            post_text TEXT,
+            media TEXT,
+            media_type TEXT,
+            start_time TEXT,
+            end_time TEXT,
+            status TEXT,
+            message_id INTEGER,
+            notified INTEGER DEFAULT 0
+        )
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings(
+            id INTEGER PRIMARY KEY,
+            price_per_day INTEGER
+        )
+        """)
+
+        cursor.execute(
+            "INSERT OR IGNORE INTO settings(id, price_per_day) VALUES(1,?)",
+            (PRICE_PER_DAY,)
+        )
+
+        # ====== SAFE STRUCTURE UPDATE ======
+        cursor.execute("PRAGMA table_info(purchases)")
+        columns = [col[1] for col in cursor.fetchall()]
+
+        if "media" not in columns:
+            cursor.execute("ALTER TABLE purchases ADD COLUMN media TEXT")
+
+        if "media_type" not in columns:
+            cursor.execute("ALTER TABLE purchases ADD COLUMN media_type TEXT")
+
+    print("✅ База данных инициализирована")
+
 def days_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -160,12 +227,18 @@ def admin_confirmation_keyboard(purchase_id: int):
 
 # ================= LOGIC =================
 def get_price() -> int:
-    cursor.execute("SELECT price_per_day FROM settings WHERE id=1")
-    return cursor.fetchone()[0]
+    """Возвращает текущую цену за день"""
+    with db_cursor() as cursor:
+        cursor.execute("SELECT price_per_day FROM settings WHERE id=1")
+        result = cursor.fetchone()
+        return result[0] if result else PRICE_PER_DAY
 
 def get_total_income():
-    cursor.execute("SELECT start_time, end_time FROM purchases WHERE status IN ('active','finished')")
-    rows = cursor.fetchall()
+    """Возвращает общий доход за все время"""
+    with db_cursor() as cursor:
+        cursor.execute("SELECT start_time, end_time FROM purchases WHERE status IN ('active','finished')")
+        rows = cursor.fetchall()
+    
     total = 0
     price = get_price()
     for start_str, end_str in rows:
@@ -175,10 +248,14 @@ def get_total_income():
     return total
 
 def get_month_stats():
+    """Возвращает статистику за текущий месяц"""
     now = datetime.now()
     month_start = datetime(now.year, now.month, 1)
-    cursor.execute("SELECT start_time, end_time FROM purchases WHERE status IN ('active','finished')")
-    rows = cursor.fetchall()
+    
+    with db_cursor() as cursor:
+        cursor.execute("SELECT start_time, end_time FROM purchases WHERE status IN ('active','finished')")
+        rows = cursor.fetchall()
+    
     total_income = 0
     total_sales = 0
     price = get_price()
@@ -191,9 +268,14 @@ def get_month_stats():
     return total_sales, total_income
 
 def is_slot_free(start_date: datetime, days: int) -> bool:
+    """Проверяет, свободен ли слот для бронирования"""
     end_date = start_date + timedelta(days=days)
-    cursor.execute("SELECT start_time,end_time,status FROM purchases WHERE status IN ('waiting_admin','active')")
-    for db_start_str, db_end_str, _ in cursor.fetchall():
+    
+    with db_cursor() as cursor:
+        cursor.execute("SELECT start_time, end_time FROM purchases WHERE status IN ('waiting_admin','active')")
+        rows = cursor.fetchall()
+    
+    for db_start_str, db_end_str in rows:
         db_start = datetime.fromisoformat(db_start_str)
         db_end = datetime.fromisoformat(db_end_str)
         if not (end_date <= db_start or start_date >= db_end):
@@ -201,24 +283,27 @@ def is_slot_free(start_date: datetime, days: int) -> bool:
     return True
 
 def add_purchase_reserve(telegram_id: int, post_text: str, start_time: datetime, end_time: datetime) -> int:
-    cursor.execute("""
-        INSERT INTO purchases(telegram_id, post_text, start_time, end_time, status)
-        VALUES(?,?,?,?,?)
-    """, (telegram_id, post_text, start_time.isoformat(), end_time.isoformat(), "waiting_payment"))
-    conn.commit()
-    return cursor.lastrowid
+    """Добавляет резерв заказа"""
+    with db_cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO purchases(telegram_id, post_text, start_time, end_time, status)
+            VALUES(?,?,?,?,?)
+        """, (telegram_id, post_text, start_time.isoformat(), end_time.isoformat(), "waiting_payment"))
+        return cursor.lastrowid
 
 async def scheduler():
     while True:
         now = datetime.now()
+        
+        with db_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, telegram_id, end_time, message_id
+                FROM purchases
+                WHERE status='active'
+            """)
+            active_purchases = cursor.fetchall()
 
-        cursor.execute("""
-            SELECT id, telegram_id, end_time, message_id
-            FROM purchases
-            WHERE status='active'
-        """)
-
-        for purchase_id, tg_id, end_time_str, message_id in cursor.fetchall():
+        for purchase_id, tg_id, end_time_str, message_id in active_purchases:
             end_time = datetime.fromisoformat(end_time_str)
 
             if now >= end_time:
@@ -228,34 +313,35 @@ async def scheduler():
                 except:
                     pass
 
-                cursor.execute("""
-                    UPDATE purchases
-                    SET status='finished'
-                    WHERE id=?
-                """, (purchase_id,))
-                conn.commit()
+                with db_cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE purchases
+                        SET status='finished'
+                        WHERE id=?
+                    """, (purchase_id,))
 
         await asyncio.sleep(20)
 
 # ================= HANDLERS =================
 @dp.message(CommandStart())
 async def start(message: types.Message, state: FSMContext):
-    cursor.execute(
-        "INSERT OR IGNORE INTO users(telegram_id, username) VALUES(?,?)",
-        (message.from_user.id, message.from_user.username)
-    )
-    conn.commit()
+    # Добавляем пользователя
+    with db_cursor() as cursor:
+        cursor.execute(
+            "INSERT OR IGNORE INTO users(telegram_id, username) VALUES(?,?)",
+            (message.from_user.id, message.from_user.username)
+        )
 
     await message.answer(
         "🏍 Приветствуем в системе закрепов «Мото-Любители»!\n\n"
         "📌 Через этого бота вы можете закрепить свой пост в нашем чате (https://t.me/moto_kinechma) на выбранное время.\n"
         "💡 Важно: обязательно укажите в посте свой @username, чтобы другие могли связаться с вами.\n"
+        "💡 Важно: видео и гс не принимает бот, только текст и фото.\n"
         "💳 Выберите срок закрепа, оплатите через кнопку и ждите подтверждения админа.\n\n"
         "🛠 Используйте кнопки ниже для покупки закрепа или просмотра вашей истории.",
         reply_markup=main_menu()
     )
     await state.clear()
-
 @dp.message(F.text == "📌 Купить закреп")
 async def buy(message: types.Message, state: FSMContext):
     await message.answer(f"💰 Цена за 1 день: {get_price()} руб\nВыберите срок:", reply_markup=days_keyboard())
@@ -315,6 +401,7 @@ async def receive_post(message: types.Message, state: FSMContext):
         media_type = "photo"
         media_ids = message.photo[-1].file_id
 
+    # Добавляем заказ
     purchase_id = add_purchase_reserve(
         message.from_user.id,
         post_text,
@@ -322,13 +409,14 @@ async def receive_post(message: types.Message, state: FSMContext):
         end_date
     )
 
+    # Если есть медиа, обновляем запись
     if media_ids:
-        cursor.execute("""
-            UPDATE purchases
-            SET media=?, media_type=?
-            WHERE id=?
-        """, (media_ids, media_type, purchase_id))
-        conn.commit()
+        with db_cursor() as cursor:
+            cursor.execute("""
+                UPDATE purchases
+                SET media=?, media_type=?
+                WHERE id=?
+            """, (media_ids, media_type, purchase_id))
 
     await message.answer(
         f"💳 Резерв создан!\n\n"
@@ -343,13 +431,15 @@ async def receive_post(message: types.Message, state: FSMContext):
     )
 
     await state.clear()
-
+    
 @dp.callback_query(F.data.startswith("user_paid_"))
 async def user_paid(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[2])
 
-    cursor.execute("SELECT telegram_id, post_text, start_time, end_time, status FROM purchases WHERE id=?", (purchase_id,))
-    row = cursor.fetchone()
+    # Получаем информацию о заказе
+    with db_cursor() as cursor:
+        cursor.execute("SELECT telegram_id, post_text, start_time, end_time, status FROM purchases WHERE id=?", (purchase_id,))
+        row = cursor.fetchone()
     
     if not row:
         await callback.answer("❌ Заказ не найден", show_alert=True)
@@ -365,12 +455,16 @@ async def user_paid(callback: types.CallbackQuery):
     end_date = datetime.fromisoformat(end_str)
     days = (end_date - start_date).days
 
-    cursor.execute("SELECT username FROM users WHERE telegram_id=?", (user_id,))
-    user_row = cursor.fetchone()
+    # Получаем username
+    with db_cursor() as cursor:
+        cursor.execute("SELECT username FROM users WHERE telegram_id=?", (user_id,))
+        user_row = cursor.fetchone()
+    
     username = user_row[0] if user_row and user_row[0] else "Без username"
 
-    cursor.execute("UPDATE purchases SET status='waiting_admin' WHERE id=?", (purchase_id,))
-    conn.commit()
+    # Обновляем статус
+    with db_cursor() as cursor:
+        cursor.execute("UPDATE purchases SET status='waiting_admin' WHERE id=?", (purchase_id,))
 
     admin_text = (
         f"💳 Пользователь сообщил об оплате!\n\n"
@@ -389,7 +483,7 @@ async def user_paid(callback: types.CallbackQuery):
 
     await callback.message.edit_text("✅ Ожидаем подтверждение администратора.")
     await callback.answer()
-
+    
 @dp.callback_query(F.data.startswith("user_cancel_"))
 async def user_cancel(callback: types.CallbackQuery):
     purchase_id = int(callback.data.split("_")[2])
@@ -419,8 +513,9 @@ async def admin_waiting(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return
     
-    cursor.execute("SELECT id, telegram_id, start_time, end_time FROM purchases WHERE status='waiting_admin'")
-    rows = cursor.fetchall()
+    with db_cursor() as cursor:
+        cursor.execute("SELECT id, telegram_id, start_time, end_time FROM purchases WHERE status='waiting_admin'")
+        rows = cursor.fetchall()
     
     if not rows:
         text = "⏳ Нет ожидающих подтверждения."
@@ -431,7 +526,14 @@ async def admin_waiting(callback: types.CallbackQuery):
             end = datetime.fromisoformat(r[3]).strftime('%d.%m')
             text += f"ID {r[0]} | Пользователь {r[1]} | {start}-{end}\n"
     
-    await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
+    try:
+        await callback.message.edit_text(text, reply_markup=admin_menu_keyboard())
+    except Exception as e:
+        if "message is not modified" in str(e):
+            await callback.answer("✅ Данные актуальны", show_alert=False)
+        else:
+            await callback.answer(f"❌ Ошибка: {str(e)[:50]}", show_alert=True)
+    
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_active")
@@ -748,10 +850,19 @@ async def history(message: types.Message):
 
 # ================= START =================
 async def main():
+    # Инициализируем базу данных при запуске
+    init_database()
+    
+    # Запускаем планировщик
     asyncio.create_task(scheduler())
-    print("Бот запущен...")
+    
+    print("🤖 Бот запущен...")
+    print(f"👑 Админы: {ADMIN_IDS}")
+    print(f"📢 Чат для закрепов: {CHAT_ID}")
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
