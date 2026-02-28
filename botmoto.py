@@ -11,7 +11,7 @@ from aiogram.filters.state import State, StatesGroup
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("API_TOKEN")  # вставьте сюда токен
-CHAT_ID = -1003732723471  # чат для закрепов
+CHAT_ID = -1002078737043  # чат для закрепов
 ADMIN_IDS = [411379361]  # ID админа
 PRICE_PER_DAY = 100
 
@@ -754,3 +754,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
